@@ -17,6 +17,22 @@ It is a Rust reimplementation of the Python `okta-awscli` workflow with the same
 
 ## Install
 
+Install the latest release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/feature/rust-okta-awscli/scripts/install.sh | sh
+```
+
+Install a specific version:
+
+```sh
+OKTA_AWSCLI_RS_VERSION=0.1.0 curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/feature/rust-okta-awscli/scripts/install.sh | sh
+```
+
+The installer downloads the matching release asset for macOS or Linux, verifies `SHA256SUMS`, and installs `okta-awscli-rs` into `${HOME}/.local/bin` by default. Set `INSTALL_DIR` to choose a different destination.
+
+Install from source:
+
 ```sh
 cargo install --path .
 ```
@@ -150,6 +166,7 @@ See [docs/testing.md](docs/testing.md) for test strategy and adding new flows.
 - [docs/auth-flow.md](docs/auth-flow.md): Okta, SAML, MFA, and AWS STS flow.
 - [docs/testing.md](docs/testing.md): unit, integration, and mock E2E tests.
 - [docs/development.md](docs/development.md): crate layout and maintenance notes.
+- [docs/releasing.md](docs/releasing.md): semver, tagging, and binary release process.
 - [docs/troubleshooting.md](docs/troubleshooting.md): common failures and fixes.
 
 ## Status

@@ -86,7 +86,14 @@ pub fn authenticate_webauthn(challenge: &WebAuthnChallenge) -> Result<serde_json
     #[cfg(target_os = "macos")]
     match authenticate_webauthn_macos(challenge) {
         Ok(value) => return Ok(value),
-        Err(err) => log::debug!("macOS platform WebAuthn failed: {err:#}"),
+        Err(err) => {
+            if std::env::var_os("OKTA_AWSCLI_ALLOW_EXTERNAL_FIDO_FALLBACK").is_none() {
+                return Err(err.context(
+                    "macOS platform WebAuthn failed; set OKTA_AWSCLI_ALLOW_EXTERNAL_FIDO_FALLBACK=1 to try an external FIDO authenticator",
+                ));
+            }
+            log::debug!("macOS platform WebAuthn failed: {err:#}");
+        }
     }
 
     let client_data = json!({
@@ -205,7 +212,13 @@ final class AuthorizationDelegate: NSObject, ASAuthorizationControllerDelegate, 
     }
 
     func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
-        output = "{\"error\":\"\(error.localizedDescription.replacingOccurrences(of: "\"\\\"", with: "\\\\\\\\"").replacingOccurrences(of: "\"\n\"", with: "\" \""))\"}"
+        let payload = ["error": error.localizedDescription]
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+           let json = String(data: data, encoding: .utf8) {
+            output = json
+        } else {
+            output = "{\"error\":\"authorization failed\"}"
+        }
         completed = true
     }
 }

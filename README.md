@@ -74,7 +74,7 @@ Common optional fields:
 - `password`: Okta password. Avoid storing this in plaintext when possible.
 - `app-link`: Okta AWS app link. If omitted, the tool discovers AWS apps from Okta.
 - `role`: AWS role ARN. If omitted, the tool prompts you to choose a role.
-- `factor`: preferred MFA provider, usually `OKTA` or `GOOGLE`.
+- `factor`: preferred MFA provider. Supported values include `OKTA`, `OKTA_PUSH`, `OKTA_TOTP`, `GOOGLE`, `U2F`, and `OKTA_FASTPASS`.
 
 See [docs/configuration.md](docs/configuration.md) for the full config reference.
 
@@ -93,6 +93,18 @@ okta-awscli-rs --touch-id --username user@example.com --profile my-aws-profile
 ```
 
 Touch ID is an application-level gate before this binary reads the Keychain item. See [docs/touch-id.md](docs/touch-id.md) for details and limitations.
+
+## Okta FastPass
+
+Okta FastPass is different from local macOS Touch ID. `--touch-id` unlocks the password stored by this CLI; FastPass is an Okta Verify device-challenge flow controlled by Okta.
+
+To require FastPass when Okta exposes a signed-nonce or WebAuthn factor:
+
+```sh
+okta-awscli-rs --okta-fastpass --username user@example.com --profile my-aws-profile
+```
+
+If the tenant only returns Classic Authn factors such as Okta Verify TOTP or push, the command fails with the available factor list instead of prompting for a verification code.
 
 ## End-to-End Testing
 

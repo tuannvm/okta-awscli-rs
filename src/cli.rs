@@ -44,6 +44,11 @@ pub struct Args {
         help = "Store the Okta password in macOS Keychain for future --touch-id runs"
     )]
     store_touch_id: bool,
+    #[arg(
+        long,
+        help = "Require Okta FastPass / signed-nonce MFA when Okta exposes it"
+    )]
+    okta_fastpass: bool,
     #[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
     awscli_args: Vec<String>,
 }
@@ -96,6 +101,7 @@ pub async fn run() -> Result<()> {
             token: args.token.clone(),
             cache: args.cache,
             refresh_role: args.refresh_role,
+            okta_fastpass: args.okta_fastpass,
         };
         get_credentials(&mut config, &aws_auth, &provider, request).await?;
     }
@@ -115,6 +121,7 @@ struct CredentialRequest<'a> {
     token: Option<String>,
     cache: bool,
     refresh_role: bool,
+    okta_fastpass: bool,
 }
 
 async fn get_credentials<P: StsProvider + Sync>(
@@ -129,6 +136,7 @@ async fn get_credentials<P: StsProvider + Sync>(
         request.username,
         request.password,
         request.token,
+        request.okta_fastpass,
     )?;
     let (_, assertion) = okta.get_assertion(config).await?;
     let role = aws_auth

@@ -72,6 +72,12 @@ Check that the security key is connected and available to the OS. The tool waits
 
 For Okta tenants that offer multiple factors, using `factor = OKTA` with Okta Verify push is often easier for terminal workflows.
 
+## `--okta-fastpass` Lists Classic Factors
+
+Okta FastPass uses Okta Verify device challenge factors such as `signed_nonce` or WebAuthn. If Okta returns only Classic Authn factors, the tool fails instead of asking for a verification code.
+
+Use `factor = OKTA_PUSH` when you want an Okta Verify push from the Classic Authn flow. Use `--okta-fastpass` only when you specifically want the CLI to require a FastPass-capable factor.
+
 ## Cargo Cache Permission Errors
 
 Use a repo-local Cargo cache:

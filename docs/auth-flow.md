@@ -51,6 +51,8 @@ Application-level MFA:
 
 U2F support uses the Mozilla `authenticator` crate with CTAP1 fallback enabled. It builds a U2F `clientData` payload from the Okta challenge, asks the user to touch the device, and sends the authenticator response back to Okta.
 
+Okta FastPass is represented separately from U2F and TOTP. When `--okta-fastpass` is set, the CLI requires Okta to expose a `signed_nonce` or WebAuthn factor and will not silently fall back to a verification-code prompt. Completing the full FastPass device challenge requires Okta's IDX/browser challenge exchange, so Classic Authn-only tenants should use Okta Verify push instead.
+
 ## AWS Role Selection
 
 AWS roles are extracted from this SAML attribute:

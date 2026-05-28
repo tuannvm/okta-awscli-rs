@@ -41,7 +41,15 @@ The config parser is intentionally small and targets the INI subset used by `~/.
 
 ## Verification Before Changes Land
 
-Run:
+Run the common targets:
+
+```sh
+make lint
+make build
+make test
+```
+
+The targets use `CARGO_HOME=$PWD/.cargo-home` by default so dependency downloads stay inside the workspace. The underlying commands are:
 
 ```sh
 CARGO_HOME=$PWD/.cargo-home cargo fmt --check

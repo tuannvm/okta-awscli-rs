@@ -5,23 +5,22 @@ The project has three useful verification levels.
 ## Fast Checks
 
 ```sh
-CARGO_HOME=$PWD/.cargo-home cargo fmt --check
-CARGO_HOME=$PWD/.cargo-home cargo check --all-targets
+make lint
 ```
 
 ## Full Local Suite
 
 ```sh
-CARGO_HOME=$PWD/.cargo-home cargo clippy --all-targets -- -D warnings
-CARGO_HOME=$PWD/.cargo-home cargo test
+make lint
+make test
 ```
 
-`CARGO_HOME=$PWD/.cargo-home` keeps dependency downloads in the workspace. This is useful in sandboxed environments where the default Cargo cache may not be writable.
+The Makefile keeps dependency downloads in the workspace with `CARGO_HOME=$PWD/.cargo-home` by default. This is useful in sandboxed environments where the default Cargo cache may not be writable.
 
 ## Mock End-To-End Tests
 
 ```sh
-CARGO_HOME=$PWD/.cargo-home cargo test --test e2e_mock
+make test-e2e
 ```
 
 The E2E tests use `wiremock` to simulate Okta:
@@ -37,7 +36,7 @@ AWS STS is represented by a fake `StsProvider`, so tests do not require real AWS
 ## CLI Tests
 
 ```sh
-CARGO_HOME=$PWD/.cargo-home cargo test --test cli
+make test-cli
 ```
 
 The CLI test verifies that `--help` parses and exits successfully. This catches Clap configuration regressions.

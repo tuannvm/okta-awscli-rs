@@ -133,17 +133,50 @@ impl OktaAuth {
             .send()
             .await?;
         let status = resp.status();
-        let flow: Value = resp.json().await?;
+        let mut flow: Value = resp.json().await?;
+        flow = self.continue_to_enrollment(flow, status).await?;
+        self.enroll_webauthn_from_flow(&flow).await
+    }
+
+    async fn continue_to_enrollment(
+        &self,
+        flow: Value,
+        http_status: reqwest::StatusCode,
+    ) -> Result<Value> {
         match flow["status"].as_str() {
-            Some("MFA_ENROLL") => {}
-            Some("MFA_REQUIRED") => bail!(
-                "Okta requires MFA before new factor enrollment for this account. Enroll the Keychain-backed WebAuthn factor from an Okta browser session or ask an administrator to allow enrollment during authentication."
-            ),
+            Some("MFA_ENROLL") => Ok(flow),
+            Some("MFA_REQUIRED") => {
+                let factors = flow["_embedded"]["factors"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let state_token = flow["stateToken"].as_str().ok_or_else(|| {
+                    anyhow!("Okta MFA_REQUIRED response did not include stateToken")
+                })?;
+                let after_mfa = verify_base_mfa_response(
+                    &self.client,
+                    state_token,
+                    &factors,
+                    self.factor.as_deref(),
+                    self.token.as_deref(),
+                    false,
+                    &self.base_url,
+                )
+                .await?;
+                match after_mfa["status"].as_str() {
+                    Some("MFA_ENROLL") => Ok(after_mfa),
+                    Some("SUCCESS") => bail!(
+                        "Okta accepted MFA but did not offer WebAuthn enrollment through Classic Authn. Use the Okta Security Methods page for enrollment, or use --browser for FastPass-backed AWS SAML."
+                    ),
+                    Some(other) => bail!("Unsupported post-MFA enrollment status: {other}"),
+                    None => bail!("Okta post-MFA response did not include status"),
+                }
+            }
             Some("SUCCESS") => bail!(
                 "Okta signed in without offering factor enrollment. Use the Okta Security Methods page to add another WebAuthn authenticator, or ask an administrator to require/allow WebAuthn enrollment."
             ),
             Some(other) => bail!("Unsupported Okta enrollment status: {other}"),
-            None if !status.is_success() => bail!(
+            None if !http_status.is_success() => bail!(
                 "{}",
                 flow["errorSummary"]
                     .as_str()
@@ -151,7 +184,9 @@ impl OktaAuth {
             ),
             None => bail!("Okta authentication failed: missing status"),
         }
+    }
 
+    async fn enroll_webauthn_from_flow(&self, flow: &Value) -> Result<()> {
         let state_token = flow["stateToken"]
             .as_str()
             .ok_or_else(|| anyhow!("Okta MFA_ENROLL response did not include stateToken"))?;
@@ -404,7 +439,58 @@ async fn verify_base_mfa(
         "Registered MFA factors:",
         build_base_factor_name,
     )?;
-    verify_factor(
+    let response = verify_factor_response(
+        client,
+        state_token,
+        selected,
+        totp_token,
+        webauthn_keychain,
+        origin,
+    )
+    .await?;
+    response["sessionToken"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("MFA success response missing sessionToken"))
+}
+
+async fn verify_base_mfa_response(
+    client: &Client,
+    state_token: &str,
+    factors: &[Value],
+    preferred_provider: Option<&str>,
+    totp_token: Option<&str>,
+    webauthn_keychain: bool,
+    origin: &str,
+) -> Result<Value> {
+    let mut supported: Vec<&Value> = factors
+        .iter()
+        .filter(|factor| {
+            matches!(
+                factor["factorType"].as_str(),
+                Some("token:software:totp") | Some("push") | Some("u2f")
+            ) || (webauthn_keychain && factor["factorType"].as_str() == Some("webauthn"))
+        })
+        .collect();
+    supported.sort_by_key(|factor| {
+        (
+            factor["provider"].as_str().unwrap_or_default().to_string(),
+            factor["factorType"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        )
+    });
+    if supported.is_empty() {
+        bail!("MFA required, but no supported factors enrolled.");
+    }
+    let selected = choose_factor(
+        &supported,
+        preferred_provider,
+        "Registered MFA factors:",
+        build_base_factor_name,
+    )?;
+    verify_factor_response(
         client,
         state_token,
         selected,
@@ -521,14 +607,14 @@ async fn send_or_verify_app_factor(
     }
 }
 
-async fn verify_factor(
+async fn verify_factor_response(
     client: &Client,
     state_token: &str,
     factor: &Value,
     totp_token: Option<&str>,
     webauthn_keychain: bool,
     origin: &str,
-) -> Result<String> {
+) -> Result<Value> {
     let verify = factor["_links"]["verify"]["href"]
         .as_str()
         .ok_or_else(|| anyhow!("factor missing verify link"))?;
@@ -539,12 +625,7 @@ async fn verify_factor(
     let mut resp: Value = client.post(verify).json(&req).send().await?.json().await?;
     loop {
         match resp["status"].as_str() {
-            Some("SUCCESS") => {
-                return resp["sessionToken"]
-                    .as_str()
-                    .map(str::to_string)
-                    .ok_or_else(|| anyhow!("MFA success response missing sessionToken"));
-            }
+            Some("SUCCESS") | Some("MFA_ENROLL") => return Ok(resp),
             Some("MFA_CHALLENGE") if factor["factorType"].as_str() != Some("u2f") => {
                 if factor["factorType"].as_str() == Some("webauthn") {
                     if !webauthn_keychain {

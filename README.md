@@ -20,7 +20,7 @@ It is a Rust reimplementation of the Python `okta-awscli` workflow with the same
 Install the latest release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/feature/rust-okta-awscli/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/main/scripts/install.sh | sh
 ```
 
 For this private repository, use GitHub CLI authentication:
@@ -32,7 +32,7 @@ gh api repos/tuannvm/okta-awscli-rs/contents/scripts/install.sh --jq .content | 
 Install a specific version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/feature/rust-okta-awscli/scripts/install.sh | OKTA_AWSCLI_RS_VERSION=0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/main/scripts/install.sh | OKTA_AWSCLI_RS_VERSION=0.1.0 sh
 ```
 
 The installer downloads the matching release asset for macOS or Linux, verifies `SHA256SUMS`, and installs `okta-awscli-rs` into `${HOME}/.local/bin` by default. Set `INSTALL_DIR` to choose a different destination. For private releases, pass `GH_TOKEN` or `GITHUB_TOKEN`.

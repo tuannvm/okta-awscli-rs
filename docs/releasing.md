@@ -44,7 +44,7 @@ The first public release is `0.1.0`. While the major version is `0`, minor relea
 The one-line installer downloads the latest GitHub release asset for the current platform, verifies the checksum, and installs the binary into `${HOME}/.local/bin` unless `INSTALL_DIR` is set.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/feature/rust-okta-awscli/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/main/scripts/install.sh | sh
 ```
 
 For this private repository, use GitHub CLI authentication:
@@ -56,5 +56,5 @@ gh api repos/tuannvm/okta-awscli-rs/contents/scripts/install.sh --jq .content | 
 Install a specific version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/feature/rust-okta-awscli/scripts/install.sh | OKTA_AWSCLI_RS_VERSION=0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/main/scripts/install.sh | OKTA_AWSCLI_RS_VERSION=0.1.0 sh
 ```

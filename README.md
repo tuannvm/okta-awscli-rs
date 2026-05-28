@@ -108,13 +108,19 @@ If the tenant only returns Classic Authn factors such as Okta Verify TOTP or pus
 
 ## Browser-Assisted FastPass
 
-When FastPass only works in the browser, use paste mode:
+When FastPass only works in the browser, use browser capture mode:
+
+```sh
+okta-awscli-rs --okta-profile default --profile my-aws-profile --browser-capture
+```
+
+The CLI launches an isolated Chrome/Chromium-family browser session, opens the configured Okta AWS app link, lets you authenticate with FastPass, captures the AWS SAML POST, and then assumes the AWS role.
+
+If automatic capture is not available, use manual paste mode:
 
 ```sh
 okta-awscli-rs --okta-profile default --profile my-aws-profile --browser-paste
 ```
-
-The CLI opens the configured Okta AWS app link. Authenticate in the browser, copy the SAMLResponse value from the AWS SAML form, paste it into the CLI, and the CLI will still assume the AWS role and write credentials.
 
 ## End-to-End Testing
 

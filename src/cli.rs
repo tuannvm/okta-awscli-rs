@@ -1,6 +1,9 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
-use std::process::Command;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::aws::{AwsAuth, AwsSdkProvider, StsProvider};
 use crate::config::{OktaConfig, configure_interactive};
@@ -55,6 +58,11 @@ pub struct Args {
         help = "Open the configured Okta AWS app in a browser and prompt for a pasted SAMLResponse"
     )]
     browser_paste: bool,
+    #[arg(
+        long,
+        help = "Launch an isolated Chrome session, authenticate in the browser, and capture SAMLResponse automatically"
+    )]
+    browser_capture: bool,
     #[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
     awscli_args: Vec<String>,
 }
@@ -73,7 +81,11 @@ pub async fn run() -> Result<()> {
     } else {
         args.okta_profile.clone()
     };
-    let username = if args.browser_paste {
+    if args.browser_paste && args.browser_capture {
+        bail!("Use only one of --browser-paste or --browser-capture");
+    }
+    let browser_mode = args.browser_paste || args.browser_capture;
+    let username = if browser_mode {
         None
     } else {
         Some(
@@ -96,7 +108,7 @@ pub async fn run() -> Result<()> {
     } else {
         None
     };
-    if args.touch_id && !args.okta_fastpass && !args.browser_paste {
+    if args.touch_id && !args.okta_fastpass && !browser_mode {
         eprintln!(
             "Note: --touch-id only unlocks the local Keychain password. Use --okta-fastpass to require an Okta FastPass factor."
         );
@@ -123,6 +135,7 @@ pub async fn run() -> Result<()> {
             refresh_role: args.refresh_role,
             okta_fastpass: args.okta_fastpass,
             browser_paste: args.browser_paste,
+            browser_capture: args.browser_capture,
         };
         get_credentials(&mut config, &aws_auth, &provider, request).await?;
     }
@@ -144,6 +157,7 @@ struct CredentialRequest<'a> {
     refresh_role: bool,
     okta_fastpass: bool,
     browser_paste: bool,
+    browser_capture: bool,
 }
 
 async fn get_credentials<P: StsProvider + Sync>(
@@ -152,7 +166,9 @@ async fn get_credentials<P: StsProvider + Sync>(
     provider: &P,
     request: CredentialRequest<'_>,
 ) -> Result<()> {
-    let assertion = if request.browser_paste {
+    let assertion = if request.browser_capture {
+        browser_capture_assertion(config, request.okta_profile).await?
+    } else if request.browser_paste {
         browser_paste_assertion(config, request.okta_profile)?
     } else {
         let mut okta = OktaAuth::new(
@@ -195,6 +211,168 @@ async fn get_credentials<P: StsProvider + Sync>(
         aws_auth.write_sts_token(&sts_token)?;
     }
     Ok(())
+}
+
+async fn browser_capture_assertion(config: &OktaConfig, okta_profile: &str) -> Result<String> {
+    let app_link = config.app_link_for(okta_profile)?.ok_or_else(|| {
+        anyhow!(
+            "--browser-capture requires app-link in ~/.okta-aws. Run the normal flow once to discover it, or set app-link manually."
+        )
+    })?;
+    let chrome = chrome_path()?;
+    let profile_dir = browser_capture_profile_dir()?;
+    fs::create_dir_all(&profile_dir)?;
+    let mut child = Command::new(&chrome)
+        .arg("--remote-debugging-port=0")
+        .arg(format!("--user-data-dir={}", profile_dir.display()))
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--new-window")
+        .arg("about:blank")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("starting Chrome at {}", chrome.display()))?;
+    let result = capture_saml_with_chrome(&profile_dir, &app_link).await;
+    shutdown_browser(&mut child);
+    let _ = fs::remove_dir_all(&profile_dir);
+    result
+}
+
+fn chrome_path() -> Result<PathBuf> {
+    let candidates = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    ];
+    for candidate in candidates {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+    for name in [
+        "google-chrome",
+        "chromium",
+        "chromium-browser",
+        "brave-browser",
+    ] {
+        if let Ok(output) = Command::new("which").arg(name).output()
+            && output.status.success()
+        {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Ok(PathBuf::from(path));
+            }
+        }
+    }
+    bail!("--browser-capture requires Chrome, Chromium, Brave, or Edge")
+}
+
+fn browser_capture_profile_dir() -> Result<PathBuf> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+    Ok(std::env::temp_dir().join(format!(
+        "okta-awscli-rs-chrome-{}-{now}",
+        std::process::id()
+    )))
+}
+
+async fn capture_saml_with_chrome(profile_dir: &Path, app_link: &str) -> Result<String> {
+    let port = wait_for_devtools_port(profile_dir).await?;
+    let client = reqwest::Client::new();
+    let page_ws = wait_for_page_websocket(&client, port).await?;
+    let (mut socket, _) =
+        tungstenite::connect(&page_ws).context("connecting to Chrome DevTools")?;
+    cdp_send(&mut socket, 1, "Page.enable", serde_json::json!({}))?;
+    cdp_send(
+        &mut socket,
+        2,
+        "Network.enable",
+        serde_json::json!({ "maxPostDataSize": 10485760 }),
+    )?;
+    cdp_send(
+        &mut socket,
+        3,
+        "Page.navigate",
+        serde_json::json!({ "url": app_link }),
+    )?;
+    eprintln!("Opened isolated Chrome session. Complete FastPass in that browser window.");
+    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    while std::time::Instant::now() < deadline {
+        let msg = socket.read().context("reading Chrome DevTools event")?;
+        let tungstenite::Message::Text(text) = msg else {
+            continue;
+        };
+        let value: serde_json::Value = serde_json::from_str(&text)?;
+        if value["method"].as_str() != Some("Network.requestWillBeSent") {
+            continue;
+        }
+        let request = &value["params"]["request"];
+        let url = request["url"].as_str().unwrap_or_default();
+        let method = request["method"].as_str().unwrap_or_default();
+        if method == "POST"
+            && (url.contains("signin.aws.amazon.com/saml") || url.contains("amazon.com/saml"))
+            && let Some(post_data) = request["postData"].as_str()
+            && let Ok(assertion) = parse_pasted_saml_response(post_data)
+        {
+            eprintln!("Captured SAMLResponse from browser.");
+            return Ok(assertion);
+        }
+    }
+    bail!("timed out waiting for browser SAMLResponse")
+}
+
+async fn wait_for_devtools_port(profile_dir: &Path) -> Result<u16> {
+    let active_port = profile_dir.join("DevToolsActivePort");
+    for _ in 0..100 {
+        if let Ok(contents) = fs::read_to_string(&active_port)
+            && let Some(line) = contents.lines().next()
+            && let Ok(port) = line.parse::<u16>()
+        {
+            return Ok(port);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    bail!("Chrome did not expose a DevTools port")
+}
+
+async fn wait_for_page_websocket(client: &reqwest::Client, port: u16) -> Result<String> {
+    let list_url = format!("http://127.0.0.1:{port}/json/list");
+    for _ in 0..100 {
+        if let Ok(resp) = client.get(&list_url).send().await
+            && let Ok(pages) = resp.json::<Vec<serde_json::Value>>().await
+        {
+            for page in pages {
+                if page["type"].as_str() == Some("page")
+                    && let Some(ws) = page["webSocketDebuggerUrl"].as_str()
+                {
+                    return Ok(ws.to_string());
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    bail!("Chrome did not expose a debuggable page")
+}
+
+fn cdp_send(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<()> {
+    socket.send(tungstenite::Message::Text(
+        serde_json::json!({ "id": id, "method": method, "params": params })
+            .to_string()
+            .into(),
+    ))?;
+    Ok(())
+}
+
+fn shutdown_browser(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn browser_paste_assertion(config: &OktaConfig, okta_profile: &str) -> Result<String> {

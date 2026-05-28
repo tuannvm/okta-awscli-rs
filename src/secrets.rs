@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 const SERVICE: &str = "okta-awscli-rs";
-const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+pub const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
 pub fn password(
     config_password: Option<String>,
@@ -29,7 +29,10 @@ pub fn macos_keychain_get(okta_profile: &str, username: &str) -> Result<Option<S
     if !cfg!(target_os = "macos") {
         bail!("Touch ID password unlock is only supported on macOS");
     }
-    require_local_auth(okta_profile)?;
+    verify_local_user(
+        &format!("Unlock Okta password for profile {okta_profile}"),
+        false,
+    )?;
     macos_keychain_get_impl(okta_profile, username)
 }
 
@@ -80,21 +83,31 @@ fn macos_keychain_set_impl(_okta_profile: &str, _username: &str, _password: &str
     bail!("Touch ID password storage is only supported on macOS")
 }
 
-fn require_local_auth(okta_profile: &str) -> Result<()> {
+pub fn verify_local_user(reason: &str, allow_password: bool) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        bail!("Local user verification is only supported on macOS");
+    }
+    let reason = serde_json::to_string(reason)?;
+    let policy = if allow_password {
+        "LAPolicy.deviceOwnerAuthentication"
+    } else {
+        "LAPolicy.deviceOwnerAuthenticationWithBiometrics"
+    };
     let script = format!(
         r#"import Foundation
 import LocalAuthentication
 
 let context = LAContext()
 var error: NSError?
-guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {{
-    FileHandle.standardError.write(Data("Touch ID is not available or not enrolled\n".utf8))
+let policy = {policy}
+guard context.canEvaluatePolicy(policy, error: &error) else {{
+    FileHandle.standardError.write(Data("Local user verification is not available\n".utf8))
     exit(2)
 }}
 
 let semaphore = DispatchSemaphore(value: 0)
 var success = false
-context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: "Unlock Okta password for profile {okta_profile}") {{ ok, _ in
+context.evaluatePolicy(policy, localizedReason: {reason}) {{ ok, _ in
     success = ok
     semaphore.signal()
 }}
@@ -108,8 +121,8 @@ exit(success ? 0 : 1)
         .status();
     match status {
         Ok(status) if status.success() => Ok(()),
-        Ok(_) => bail!("Touch ID authentication failed"),
-        Err(err) => bail!("could not invoke Touch ID authentication: {err}"),
+        Ok(_) => bail!("Local user verification failed"),
+        Err(err) => bail!("could not invoke local user verification: {err}"),
     }
 }
 

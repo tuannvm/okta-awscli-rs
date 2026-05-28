@@ -57,6 +57,8 @@ U2F support uses the Mozilla `authenticator` crate with CTAP1 fallback enabled. 
 
 FastPass and platform fingerprint authenticators are handled through `--browser`, because those checks require a browser-associated flow.
 
+`--webauthn-keychain` is an experimental terminal-only path for Classic Authn `webauthn` factors. It reads a `ctap-keyring-device` compatible credential from macOS Keychain, verifies the local user with Touch ID or macOS password, signs the Okta challenge, and submits the WebAuthn assertion. It is separate from browser FastPass and does not use browser/iCloud passkeys.
+
 ## AWS Role Selection
 
 AWS roles are extracted from this SAML attribute:

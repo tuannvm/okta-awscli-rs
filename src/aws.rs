@@ -26,7 +26,7 @@ pub struct Role {
     pub role_arn: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct StsToken {
     pub access_key_id: String,
     pub secret_access_key: String,

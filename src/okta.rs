@@ -11,7 +11,7 @@ use zeroize::Zeroize;
 
 use crate::config::OktaConfig;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OktaAuth {
     client: Client,
     base_url: String,
@@ -22,6 +22,7 @@ pub struct OktaAuth {
     username: String,
     password: String,
     token: Option<String>,
+    webauthn_keychain: bool,
 }
 
 impl Drop for OktaAuth {
@@ -69,6 +70,7 @@ impl OktaAuth {
         username: String,
         password: String,
         token: Option<String>,
+        webauthn_keychain: bool,
     ) -> Result<Self> {
         let configured_base = config.base_url_for(okta_profile)?;
         let base_url =
@@ -90,6 +92,7 @@ impl OktaAuth {
             username,
             password,
             token,
+            webauthn_keychain,
         })
     }
 
@@ -146,6 +149,8 @@ impl OktaAuth {
                     &factors,
                     self.factor.as_deref(),
                     self.token.as_deref(),
+                    self.webauthn_keychain,
+                    &self.base_url,
                 )
                 .await
             }
@@ -274,6 +279,8 @@ async fn verify_base_mfa(
     factors: &[Value],
     preferred_provider: Option<&str>,
     totp_token: Option<&str>,
+    webauthn_keychain: bool,
+    origin: &str,
 ) -> Result<String> {
     let mut supported: Vec<&Value> = factors
         .iter()
@@ -281,7 +288,7 @@ async fn verify_base_mfa(
             matches!(
                 factor["factorType"].as_str(),
                 Some("token:software:totp") | Some("push") | Some("u2f")
-            )
+            ) || (webauthn_keychain && factor["factorType"].as_str() == Some("webauthn"))
         })
         .collect();
     supported.sort_by_key(|factor| {
@@ -302,7 +309,15 @@ async fn verify_base_mfa(
         "Registered MFA factors:",
         build_base_factor_name,
     )?;
-    verify_factor(client, state_token, selected, totp_token).await
+    verify_factor(
+        client,
+        state_token,
+        selected,
+        totp_token,
+        webauthn_keychain,
+        origin,
+    )
+    .await
 }
 
 async fn stepup_auth(
@@ -416,6 +431,8 @@ async fn verify_factor(
     state_token: &str,
     factor: &Value,
     totp_token: Option<&str>,
+    webauthn_keychain: bool,
+    origin: &str,
 ) -> Result<String> {
     let verify = factor["_links"]["verify"]["href"]
         .as_str()
@@ -434,6 +451,35 @@ async fn verify_factor(
                     .ok_or_else(|| anyhow!("MFA success response missing sessionToken"));
             }
             Some("MFA_CHALLENGE") if factor["factorType"].as_str() != Some("u2f") => {
+                if factor["factorType"].as_str() == Some("webauthn") {
+                    if !webauthn_keychain {
+                        bail!(
+                            "Okta returned a WebAuthn factor. Re-run with --webauthn-keychain to try the experimental macOS Keychain-backed authenticator, or use --browser for browser FastPass."
+                        );
+                    }
+                    let auth_response = crate::webauthn_keychain::authenticate(
+                        &webauthn_challenge(&resp, origin)?,
+                    )?;
+                    let next = resp["_links"]["next"]["href"]
+                        .as_str()
+                        .ok_or_else(|| anyhow!("WebAuthn challenge missing next link"))?;
+                    let mut webauthn_req = req.clone();
+                    if let Some(map) = webauthn_req.as_object_mut()
+                        && let Some(auth_map) = auth_response.as_object()
+                    {
+                        for (key, value) in auth_map {
+                            map.insert(key.clone(), value.clone());
+                        }
+                    }
+                    resp = client
+                        .post(next)
+                        .json(&webauthn_req)
+                        .send()
+                        .await?
+                        .json()
+                        .await?;
+                    continue;
+                }
                 println!("Waiting for push verification...");
                 match resp["factorResult"].as_str() {
                     Some("TIMEOUT") => bail!("Verification timed out"),
@@ -526,6 +572,7 @@ fn build_base_factor_name(factor: &Value) -> String {
         (Some("GOOGLE"), _) => with_profile(factor, "Google Authenticator"),
         (Some("OKTA"), Some("push")) => with_profile(factor, "Okta Verify - Push"),
         (Some("OKTA"), Some("token:software:totp")) => with_profile(factor, "Okta Verify - TOTP"),
+        (_, Some("webauthn")) => with_profile(factor, "WebAuthn platform authenticator"),
         (Some("OKTA"), Some(factor_type)) => {
             with_profile(factor, &format!("Okta Verify - {factor_type}"))
         }
@@ -543,6 +590,7 @@ fn factor_matches_preference(factor: &Value, preference: &str) -> bool {
         "PUSH" | "OKTA_PUSH" => provider == "OKTA" && factor_type == "push",
         "TOTP" | "OKTA_TOTP" => provider == "OKTA" && factor_type == "token:software:totp",
         "GOOGLE" | "GOOGLE_TOTP" => provider == "GOOGLE",
+        "WEBAUTHN" | "WEBAUTHN_KEYCHAIN" => factor_type == "webauthn",
         "U2F" | "FIDO" => factor_type == "u2f" || provider == "FIDO",
         _ => provider == preference,
     }
@@ -565,6 +613,7 @@ fn factor_rank(factor: &Value) -> u8 {
     match factor["factorType"].as_str() {
         Some("push") => 0,
         Some("u2f") => 1,
+        Some("webauthn") => 1,
         Some("token:software:totp") => 2,
         _ => 3,
     }
@@ -611,9 +660,37 @@ fn build_app_factor_name(factor: &Value) -> String {
                 .as_str()
                 .unwrap_or("unknown")
         ),
+        Some("webauthn") => with_profile(factor, "WebAuthn platform authenticator"),
         Some(other) => format!("Unknown MFA type: {other}"),
         None => "Unknown MFA type".to_string(),
     }
+}
+
+fn webauthn_challenge(
+    response: &Value,
+    origin: &str,
+) -> Result<crate::webauthn_keychain::WebAuthnChallenge> {
+    let challenge = response["_embedded"]["factor"]["_embedded"]["challenge"]["challenge"]
+        .as_str()
+        .ok_or_else(|| anyhow!("WebAuthn challenge missing challenge value"))?;
+    let credential_id = response["_embedded"]["factor"]["profile"]["credentialId"]
+        .as_str()
+        .ok_or_else(|| anyhow!("WebAuthn challenge missing credentialId"))?;
+    let user_verification =
+        response["_embedded"]["factor"]["_embedded"]["challenge"]["userVerification"]
+            .as_str()
+            .unwrap_or("required");
+    let relying_party_id = url::Url::parse(origin)?
+        .host_str()
+        .ok_or_else(|| anyhow!("Okta origin missing host"))?
+        .to_string();
+    Ok(crate::webauthn_keychain::WebAuthnChallenge {
+        origin: origin.to_string(),
+        relying_party_id,
+        credential_id: credential_id.to_string(),
+        challenge: challenge.to_string(),
+        user_verification: user_verification.to_string(),
+    })
 }
 
 fn pass_code(totp_token: Option<&str>) -> Result<String> {

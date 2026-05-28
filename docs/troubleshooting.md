@@ -83,6 +83,12 @@ If capture times out:
 - Complete the AWS SAML app launch in the isolated browser window, not a normal browser window.
 - Use `--browser-paste` as a manual fallback.
 
+## WebAuthn Keychain Has No Credential
+
+`--webauthn-keychain` only works with macOS Keychain credentials stored in the `ctap-keyring-device` compatible format for the Okta relying party. Browser/iCloud passkeys cannot be read by this CLI.
+
+Use `--browser` when your fingerprint authenticator was registered in a normal browser or through Okta FastPass.
+
 ## Cargo Cache Permission Errors
 
 Use a repo-local Cargo cache:

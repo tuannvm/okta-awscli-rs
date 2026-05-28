@@ -59,6 +59,11 @@ pub struct Args {
         help = "Launch an isolated Chrome session, authenticate in the browser, and capture SAMLResponse automatically"
     )]
     browser: bool,
+    #[arg(
+        long = "webauthn-keychain",
+        help = "Experimental: answer Okta WebAuthn factors with a macOS Keychain-backed virtual authenticator"
+    )]
+    webauthn_keychain: bool,
     #[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
     awscli_args: Vec<String>,
 }
@@ -131,6 +136,7 @@ pub async fn run() -> Result<()> {
             refresh_role: args.refresh_role,
             browser_paste: args.browser_paste,
             browser: args.browser,
+            webauthn_keychain: args.webauthn_keychain,
         };
         get_credentials(&mut config, &aws_auth, &provider, request).await?;
     }
@@ -152,6 +158,7 @@ struct CredentialRequest<'a> {
     refresh_role: bool,
     browser_paste: bool,
     browser: bool,
+    webauthn_keychain: bool,
 }
 
 async fn get_credentials<P: StsProvider + Sync>(
@@ -175,6 +182,7 @@ async fn get_credentials<P: StsProvider + Sync>(
                 .password
                 .ok_or_else(|| anyhow!("password missing for Okta authentication"))?,
             request.token,
+            request.webauthn_keychain,
         )?;
         okta.get_assertion(config).await?.1
     };

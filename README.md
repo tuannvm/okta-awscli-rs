@@ -113,6 +113,16 @@ If automatic capture is not available, use manual paste mode:
 okta-awscli-rs --okta-profile default --profile my-aws-profile --browser-paste
 ```
 
+## Experimental WebAuthn Keychain
+
+For Okta tenants that expose a Classic Authn `webauthn` factor, the CLI can try a macOS Keychain-backed virtual authenticator:
+
+```sh
+okta-awscli-rs --okta-profile default --profile my-aws-profile --webauthn-keychain
+```
+
+This is experimental and only works with credentials stored in the `ctap-keyring-device` compatible Keychain format. It does not use browser/iCloud passkeys or replace `--browser` for FastPass.
+
 ## End-to-End Testing
 
 Run the deterministic mock E2E tests:

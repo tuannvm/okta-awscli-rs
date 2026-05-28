@@ -93,6 +93,16 @@ Manual paste mode remains available when automatic capture is not possible:
 okta-awscli-rs --okta-profile default --profile prod-admin --force --browser-paste
 ```
 
+## Experimental WebAuthn Keychain
+
+If your Okta tenant exposes a Classic Authn WebAuthn factor and the credential was enrolled through a `ctap-keyring-device` compatible virtual authenticator, try:
+
+```sh
+okta-awscli-rs --okta-profile default --profile prod-admin --force --webauthn-keychain
+```
+
+For normal browser or iCloud Keychain passkeys, use `--browser` instead.
+
 ## Use Multiple Okta Profiles
 
 Select a profile explicitly:

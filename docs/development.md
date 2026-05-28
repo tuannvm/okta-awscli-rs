@@ -8,7 +8,7 @@
 | `src/config.rs` | `~/.okta-aws` parsing, profile fallback, interactive config creation. |
 | `src/okta.rs` | Okta Authn, sessions, appLinks, MFA, and SAML extraction. |
 | `src/aws.rs` | SAML role parsing, AWS STS/IAM calls, credential file writes, AWS CLI passthrough. |
-| `src/secrets.rs` | Password source selection, macOS Keychain, Touch ID preflight. |
+| `src/secrets.rs` | Password prompting and local macOS user verification for experimental WebAuthn Keychain. |
 | `src/u2f.rs` | U2F security key authentication. |
 | `tests/e2e_mock.rs` | Mock Okta-to-AWS flow tests. |
 | `tests/cli.rs` | CLI parsing tests. |

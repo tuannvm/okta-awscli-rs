@@ -27,7 +27,7 @@ duration = 3600
 | --- | --- | --- |
 | `base-url` | Yes | Okta org host, such as `example.okta.com`. Tests may use a full `http://` URL for mock servers. |
 | `username` | No | Okta username. If omitted, the tool prompts. |
-| `password` | No | Okta password. If omitted, the tool prompts or reads from Keychain with `--touch-id`. |
+| `password` | No | Okta password. If omitted, the tool prompts interactively. Avoid storing this in plaintext when possible. |
 | `factor` | No | Preferred MFA provider. Supported values include `OKTA`, `OKTA_PUSH`, `OKTA_TOTP`, `GOOGLE`, and `U2F`. |
 | `profile` | No | AWS profile to write credentials into. Overridden by `--profile`. |
 | `app-link` | No | Direct Okta AWS app link. If omitted, the tool discovers AWS apps through Okta appLinks. |

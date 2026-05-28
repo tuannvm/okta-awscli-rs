@@ -2,7 +2,7 @@
 
 `okta-awscli-rs` signs in to Okta, retrieves an AWS SAML assertion, exchanges it for temporary AWS STS credentials, and optionally runs `aws` with those credentials.
 
-It is a Rust reimplementation of the Python `okta-awscli` workflow with the same config file shape and CLI habits, plus macOS Touch ID-assisted password unlock.
+It is a Rust reimplementation of the Python `okta-awscli` workflow with the same config file shape and CLI habits.
 
 ## What It Does
 
@@ -13,7 +13,6 @@ It is a Rust reimplementation of the Python `okta-awscli` workflow with the same
 - Extracts the AWS SAML response and calls AWS STS `AssumeRoleWithSAML`.
 - Writes temporary credentials to `~/.aws/credentials` or `AWS_SHARED_CREDENTIALS_FILE`.
 - Runs `aws --profile <profile> ...` when AWS CLI arguments are provided.
-- Can store the Okta password in macOS Keychain and require Touch ID before reading it.
 - Supports browser-assisted FastPass/fingerprint authentication with an isolated Chrome/Chromium-family session.
 
 ## Install
@@ -87,22 +86,6 @@ Common optional fields:
 
 See [docs/configuration.md](docs/configuration.md) for the full config reference.
 
-## macOS Touch ID
-
-Store the Okta password in Keychain:
-
-```sh
-okta-awscli-rs --store-touch-id --username user@example.com
-```
-
-Use Touch ID before reading the stored password:
-
-```sh
-okta-awscli-rs --touch-id --username user@example.com --profile my-aws-profile
-```
-
-Touch ID is an application-level gate before this binary reads the Keychain item. See [docs/touch-id.md](docs/touch-id.md) for details and limitations.
-
 ## Browser-Assisted FastPass
 
 Use browser capture mode when FastPass or a platform fingerprint authenticator is required:
@@ -118,8 +101,6 @@ Use a longer wait when your sign-in flow needs more time:
 ```sh
 okta-awscli-rs --okta-profile default --profile my-aws-profile --browser --browser-timeout 300
 ```
-
-`--touch-id` is different: it only unlocks the local Keychain password used by the terminal Authn flow.
 
 If automatic capture is not available, use manual paste mode:
 
@@ -167,7 +148,6 @@ See [docs/testing.md](docs/testing.md) for test strategy and adding new flows.
 - [docs/getting-started.md](docs/getting-started.md): first run and common commands.
 - [docs/configuration.md](docs/configuration.md): `~/.okta-aws` and AWS credential file behavior.
 - [docs/auth-flow.md](docs/auth-flow.md): Okta, SAML, MFA, and AWS STS flow.
-- [docs/touch-id.md](docs/touch-id.md): macOS Keychain and Touch ID support.
 - [docs/testing.md](docs/testing.md): unit, integration, and mock E2E tests.
 - [docs/development.md](docs/development.md): crate layout and maintenance notes.
 - [docs/troubleshooting.md](docs/troubleshooting.md): common failures and fixes.

@@ -41,16 +41,6 @@ pub struct Args {
     switch_profile: bool,
     #[arg(
         long,
-        help = "Unlock the Okta password from macOS Keychain after Touch ID verification"
-    )]
-    touch_id: bool,
-    #[arg(
-        long,
-        help = "Store the Okta password in macOS Keychain for future --touch-id runs"
-    )]
-    store_touch_id: bool,
-    #[arg(
-        long,
         help = "Open the configured Okta AWS app in a browser and prompt for a pasted SAMLResponse"
     )]
     browser_paste: bool,
@@ -115,19 +105,11 @@ pub async fn run() -> Result<()> {
             args.okta_password
                 .clone()
                 .or(config.password_for(&okta_profile)?),
-            &okta_profile,
             username,
-            args.touch_id,
-            args.store_touch_id,
         )?)
     } else {
         None
     };
-    if args.touch_id && !browser_mode {
-        eprintln!(
-            "Note: --touch-id only unlocks the local Keychain password. Use --browser for browser-based Okta FastPass."
-        );
-    }
 
     if args.webauthn_keychain_enroll {
         let okta = OktaAuth::new(

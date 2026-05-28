@@ -56,16 +56,6 @@ If you need aliases everywhere, attach permission for:
 iam:ListAccountAliases
 ```
 
-## Touch ID Is Not Available
-
-Touch ID requires macOS, enrolled biometrics, and `/usr/bin/swift` so the tool can run LocalAuthentication.
-
-Fallback options:
-
-- Omit `--touch-id` and enter the password interactively.
-- Pass `--password` for automation, understanding the shell-history risk.
-- Store `password` in `~/.okta-aws` only if that is acceptable for your environment.
-
 ## U2F Device Not Detected
 
 Check that the security key is connected and available to the OS. The tool waits for the U2F callback and times out if the device does not respond.

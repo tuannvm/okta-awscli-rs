@@ -11,7 +11,7 @@ The DevTools listener is bound to `127.0.0.1`, uses a random port chosen by Chro
 ## High-Level Flow
 
 1. Read `~/.okta-aws`.
-2. Collect username and password from flags, config, prompt, or Touch ID-assisted Keychain lookup.
+2. Collect username and password from flags, config, or prompt.
 3. POST primary credentials to Okta Authn:
 
    ```text
@@ -59,7 +59,7 @@ U2F support uses the Mozilla `authenticator` crate with CTAP1 fallback enabled. 
 
 FastPass and platform fingerprint authenticators are handled through `--browser`, because those checks require a browser-associated flow.
 
-`--webauthn-keychain` is an experimental terminal-only path for Classic Authn `webauthn` factors. It reads a `ctap-keyring-device` compatible credential from macOS Keychain, verifies the local user with Touch ID or macOS password, signs the Okta challenge, and submits the WebAuthn assertion. It is separate from browser FastPass and does not use browser/iCloud passkeys.
+`--webauthn-keychain` is an experimental terminal-only path for Classic Authn `webauthn` factors. It reads a `ctap-keyring-device` compatible credential from macOS Keychain, verifies the local macOS user, signs the Okta challenge, and submits the WebAuthn assertion. It is separate from browser FastPass and does not use browser/iCloud passkeys.
 
 `--webauthn-keychain-enroll` is the matching experimental enrollment helper. It authenticates to `/api/v1/authn`, requires Okta to return `MFA_ENROLL` with a WebAuthn factor, posts to the factor enroll link, builds a WebAuthn make-credential response locally, activates the factor with Okta, and then stores the generated encrypted private key in macOS Keychain. If Okta returns `MFA_REQUIRED` or does not offer WebAuthn enrollment, the helper stops instead of trying to bypass policy.
 

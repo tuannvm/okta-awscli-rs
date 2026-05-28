@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -196,7 +197,7 @@ async fn get_credentials<P: StsProvider + Sync>(
             let cache_path = dirs::home_dir()
                 .ok_or_else(|| anyhow::anyhow!("could not locate home directory"))?
                 .join(".okta-credentials.cache");
-            std::fs::write(cache_path, &exports)?;
+            write_private_file(&cache_path, exports.as_bytes())?;
         }
         println!("{exports}");
     } else {
@@ -213,7 +214,7 @@ async fn browser_assertion(config: &OktaConfig, okta_profile: &str) -> Result<St
     })?;
     let chrome = chrome_path()?;
     let profile_dir = browser_profile_dir()?;
-    fs::create_dir_all(&profile_dir)?;
+    create_private_dir(&profile_dir)?;
     let mut child = Command::new(&chrome)
         .arg("--remote-debugging-port=0")
         .arg(format!("--user-data-dir={}", profile_dir.display()))
@@ -229,6 +230,36 @@ async fn browser_assertion(config: &OktaConfig, okta_profile: &str) -> Result<St
     shutdown_browser(&mut child);
     let _ = fs::remove_dir_all(&profile_dir);
     result
+}
+
+fn create_private_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, contents)?;
+    }
+    Ok(())
 }
 
 fn chrome_path() -> Result<PathBuf> {

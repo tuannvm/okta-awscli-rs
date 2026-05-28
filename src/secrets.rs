@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 const SERVICE: &str = "okta-awscli-rs";
+const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
 pub fn password(
     config_password: Option<String>,
@@ -29,58 +30,54 @@ pub fn macos_keychain_get(okta_profile: &str, username: &str) -> Result<Option<S
         bail!("Touch ID password unlock is only supported on macOS");
     }
     require_local_auth(okta_profile)?;
+    macos_keychain_get_impl(okta_profile, username)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_keychain_get_impl(okta_profile: &str, username: &str) -> Result<Option<String>> {
+    use security_framework::os::macos::keychain::SecKeychain;
+
     let account = account(okta_profile, username);
-    let output = std::process::Command::new("/usr/bin/security")
-        .args(["find-generic-password", "-w", "-s", SERVICE, "-a", &account])
-        .output()
-        .context("running security find-generic-password")?;
-    if output.status.success() {
-        Ok(Some(
-            String::from_utf8(output.stdout)?
-                .trim_end_matches('\n')
-                .to_string(),
-        ))
-    } else if output.status.code() == Some(44) {
-        Ok(None)
-    } else {
-        Err(anyhow!(
-            "{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
+    let keychain = SecKeychain::default().context("opening default macOS Keychain")?;
+    match keychain.find_generic_password(SERVICE, &account) {
+        Ok((password, _)) => {
+            let value = String::from_utf8(password.as_ref().to_vec())
+                .context("decoding macOS Keychain password as UTF-8")?;
+            Ok(Some(value))
+        }
+        Err(err) if err.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
+        Err(err) => Err(anyhow!("macOS Keychain lookup failed: {err}")),
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_keychain_get_impl(_okta_profile: &str, _username: &str) -> Result<Option<String>> {
+    bail!("Touch ID password unlock is only supported on macOS")
 }
 
 pub fn macos_keychain_set(okta_profile: &str, username: &str, password: &str) -> Result<()> {
     if !cfg!(target_os = "macos") {
         bail!("Touch ID password storage is only supported on macOS");
     }
+    macos_keychain_set_impl(okta_profile, username, password)?;
+    println!("Stored Okta password in macOS Keychain. Use --touch-id to unlock it on future runs.");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_keychain_set_impl(okta_profile: &str, username: &str, password: &str) -> Result<()> {
+    use security_framework::os::macos::keychain::SecKeychain;
+
     let account = account(okta_profile, username);
-    let output = std::process::Command::new("/usr/bin/security")
-        .args([
-            "add-generic-password",
-            "-U",
-            "-s",
-            SERVICE,
-            "-a",
-            &account,
-            "-l",
-            &format!("Okta AWS CLI password for {account}"),
-            "-w",
-            password,
-        ])
-        .output()
-        .context("running security add-generic-password")?;
-    if output.status.success() {
-        println!(
-            "Stored Okta password in macOS Keychain. Use --touch-id to unlock it on future runs."
-        );
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    }
+    let keychain = SecKeychain::default().context("opening default macOS Keychain")?;
+    keychain
+        .set_generic_password(SERVICE, &account, password.as_bytes())
+        .map_err(|err| anyhow!("macOS Keychain update failed: {err}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_keychain_set_impl(_okta_profile: &str, _username: &str, _password: &str) -> Result<()> {
+    bail!("Touch ID password storage is only supported on macOS")
 }
 
 fn require_local_auth(okta_profile: &str) -> Result<()> {

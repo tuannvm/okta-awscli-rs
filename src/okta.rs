@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::time::sleep;
+use zeroize::Zeroize;
 
 use crate::config::OktaConfig;
 
@@ -21,6 +22,15 @@ pub struct OktaAuth {
     username: String,
     password: String,
     token: Option<String>,
+}
+
+impl Drop for OktaAuth {
+    fn drop(&mut self) {
+        self.password.zeroize();
+        if let Some(token) = &mut self.token {
+            token.zeroize();
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

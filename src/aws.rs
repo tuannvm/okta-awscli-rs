@@ -9,8 +9,10 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+use zeroize::Zeroize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AwsPartition {
@@ -30,6 +32,14 @@ pub struct StsToken {
     pub secret_access_key: String,
     pub session_token: String,
     pub expiration: DateTime<Utc>,
+}
+
+impl Drop for StsToken {
+    fn drop(&mut self) {
+        self.access_key_id.zeroize();
+        self.secret_access_key.zeroize();
+        self.session_token.zeroize();
+    }
 }
 
 #[async_trait]
@@ -287,7 +297,7 @@ impl AwsAuth {
             .profile
             .as_ref()
             .ok_or_else(|| anyhow!("AWS profile is required to write credentials"))?;
-        fs::create_dir_all(&self.creds_dir)?;
+        create_private_dir(&self.creds_dir)?;
         let mut file =
             CredentialsFile::load(self.creds_file.clone()).unwrap_or_else(|_| CredentialsFile {
                 path: self.creds_file.clone(),
@@ -396,9 +406,39 @@ impl CredentialsFile {
             }
             out.push('\n');
         }
-        fs::write(&self.path, out)?;
+        write_private_file(&self.path, out.as_bytes())?;
         Ok(())
     }
+}
+
+fn create_private_dir(path: &std::path::Path) -> Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn write_private_file(path: &std::path::Path, contents: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, contents)?;
+    }
+    Ok(())
 }
 
 pub fn extract_available_roles(assertion: &str) -> Result<Vec<Role>> {

@@ -7,10 +7,10 @@ edition = "2024"
 anyhow = "1.0.98"
 async-trait = "0.1.88"
 authenticator = { version = "0.5.0", default-features = false, features = ["crypto_rust"] }
-aws-config = { version = "1.8.3", features = ["behavior-version-latest"] }
+aws-config = { version = "1.8.3", default-features = false, features = ["behavior-version-latest", "credentials-process", "default-https-client", "rt-tokio", "sso"] }
 aws-credential-types = "1.2.3"
-aws-sdk-iam = "1.87.0"
-aws-sdk-sts = "1.104.0"
+aws-sdk-iam = { version = "1.87.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-sts = { version = "1.104.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 base64 = "0.22.1"
 chrono = { version = "0.4.41", features = ["serde"] }
 clap = { version = "4.5.40", features = ["derive", "env"] }
@@ -30,6 +30,10 @@ sha2 = "0.10.9"
 tokio = { version = "1.45.1", features = ["macros", "process", "rt-multi-thread", "time"] }
 tungstenite = "0.28.0"
 url = "2.5.4"
+zeroize = "1.8.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7.0"
 
 [dev-dependencies]
 assert_cmd = "2.0.17"

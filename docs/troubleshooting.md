@@ -74,7 +74,7 @@ For Okta tenants that offer multiple factors, using `factor = OKTA` with Okta Ve
 
 ## Browser FastPass Capture Times Out
 
-Use `--browser-capture` when FastPass or a platform fingerprint authenticator is required. The terminal Authn flow supports Classic factors such as Okta Verify push, TOTP, and U2F; it does not directly complete browser-bound FastPass challenges.
+Use `--browser` when FastPass or a platform fingerprint authenticator is required. The terminal Authn flow supports Classic factors such as Okta Verify push, TOTP, and U2F; it does not directly complete browser-bound FastPass challenges.
 
 If capture times out:
 

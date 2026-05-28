@@ -100,7 +100,7 @@ Touch ID is an application-level gate before this binary reads the Keychain item
 Use browser capture mode when FastPass or a platform fingerprint authenticator is required:
 
 ```sh
-okta-awscli-rs --okta-profile default --profile my-aws-profile --browser-capture
+okta-awscli-rs --okta-profile default --profile my-aws-profile --browser
 ```
 
 The CLI launches an isolated Chrome/Chromium-family browser session, opens the configured Okta AWS app link, lets you authenticate with FastPass, captures the AWS SAML POST, and then assumes the AWS role.

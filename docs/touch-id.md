@@ -35,12 +35,12 @@ Before reading the Keychain item, the tool runs a LocalAuthentication biometric 
 Okta FastPass is not the same feature as `--touch-id`.
 
 - `--touch-id` verifies the local macOS user before this CLI reads an Okta password from Keychain.
-- `--browser-capture` opens an isolated browser session so Okta can use FastPass, Touch ID, or another browser-registered authenticator.
+- `--browser` opens an isolated browser session so Okta can use FastPass, Touch ID, or another browser-registered authenticator.
 
 Use browser capture mode like this:
 
 ```sh
-okta-awscli-rs --okta-profile default --profile prod-admin --browser-capture
+okta-awscli-rs --okta-profile default --profile prod-admin --browser
 ```
 
 Built-in macOS Touch ID/passkeys for Okta require a browser-associated or signed-app flow. A plain terminal process cannot claim the web relying party identity directly, so this tool uses the browser for FastPass and captures only the AWS SAML response needed for STS.
@@ -52,7 +52,7 @@ The current implementation is an application-level Touch ID gate before this bin
 Practical impact:
 
 - `okta-awscli-rs --touch-id` requires Touch ID before it reads the password.
-- `okta-awscli-rs --browser-capture` uses the browser for Okta FastPass/fingerprint authentication and then writes AWS credentials.
+- `okta-awscli-rs --browser` uses the browser for Okta FastPass/fingerprint authentication and then writes AWS credentials.
 - Built-in macOS Touch ID/passkeys for Okta require a browser-associated flow, not a bare terminal process.
 - Other processes with permission to read the same Keychain item are governed by normal Keychain access controls, not this tool's Touch ID check.
 

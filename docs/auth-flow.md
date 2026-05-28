@@ -2,7 +2,7 @@
 
 The implementation follows the Python tool's Classic Okta Authn plus AWS SAML design.
 
-`--browser-capture` is a separate browser-assisted path for environments where FastPass is only available in the browser. In that mode, the CLI launches an isolated Chrome/Chromium-family browser session, opens the configured Okta AWS app link, captures the AWS SAML POST through DevTools, and then resumes at AWS STS role exchange.
+`--browser` is a separate browser-assisted path for environments where FastPass is only available in the browser. In that mode, the CLI launches an isolated Chrome/Chromium-family browser session, opens the configured Okta AWS app link, captures the AWS SAML POST through DevTools, and then resumes at AWS STS role exchange.
 
 `--browser-paste` is the manual fallback. It opens the configured app link and accepts a pasted `SAMLResponse`.
 
@@ -55,7 +55,7 @@ Application-level MFA:
 
 U2F support uses the Mozilla `authenticator` crate with CTAP1 fallback enabled. It builds a U2F `clientData` payload from the Okta challenge, asks the user to touch the device, and sends the authenticator response back to Okta.
 
-FastPass and platform fingerprint authenticators are handled through `--browser-capture`, because those checks require a browser-associated flow.
+FastPass and platform fingerprint authenticators are handled through `--browser`, because those checks require a browser-associated flow.
 
 ## AWS Role Selection
 

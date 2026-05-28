@@ -54,10 +54,10 @@ pub struct Args {
     )]
     browser_paste: bool,
     #[arg(
-        long,
+        long = "browser",
         help = "Launch an isolated Chrome session, authenticate in the browser, and capture SAMLResponse automatically"
     )]
-    browser_capture: bool,
+    browser: bool,
     #[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
     awscli_args: Vec<String>,
 }
@@ -76,10 +76,10 @@ pub async fn run() -> Result<()> {
     } else {
         args.okta_profile.clone()
     };
-    if args.browser_paste && args.browser_capture {
-        bail!("Use only one of --browser-paste or --browser-capture");
+    if args.browser_paste && args.browser {
+        bail!("Use only one of --browser-paste or --browser");
     }
-    let browser_mode = args.browser_paste || args.browser_capture;
+    let browser_mode = args.browser_paste || args.browser;
     let username = if browser_mode {
         None
     } else {
@@ -105,7 +105,7 @@ pub async fn run() -> Result<()> {
     };
     if args.touch_id && !browser_mode {
         eprintln!(
-            "Note: --touch-id only unlocks the local Keychain password. Use --browser-capture for browser-based Okta FastPass."
+            "Note: --touch-id only unlocks the local Keychain password. Use --browser for browser-based Okta FastPass."
         );
     }
 
@@ -129,7 +129,7 @@ pub async fn run() -> Result<()> {
             cache: args.cache,
             refresh_role: args.refresh_role,
             browser_paste: args.browser_paste,
-            browser_capture: args.browser_capture,
+            browser: args.browser,
         };
         get_credentials(&mut config, &aws_auth, &provider, request).await?;
     }
@@ -150,7 +150,7 @@ struct CredentialRequest<'a> {
     cache: bool,
     refresh_role: bool,
     browser_paste: bool,
-    browser_capture: bool,
+    browser: bool,
 }
 
 async fn get_credentials<P: StsProvider + Sync>(
@@ -159,8 +159,8 @@ async fn get_credentials<P: StsProvider + Sync>(
     provider: &P,
     request: CredentialRequest<'_>,
 ) -> Result<()> {
-    let assertion = if request.browser_capture {
-        browser_capture_assertion(config, request.okta_profile).await?
+    let assertion = if request.browser {
+        browser_assertion(config, request.okta_profile).await?
     } else if request.browser_paste {
         browser_paste_assertion(config, request.okta_profile)?
     } else {
@@ -205,14 +205,14 @@ async fn get_credentials<P: StsProvider + Sync>(
     Ok(())
 }
 
-async fn browser_capture_assertion(config: &OktaConfig, okta_profile: &str) -> Result<String> {
+async fn browser_assertion(config: &OktaConfig, okta_profile: &str) -> Result<String> {
     let app_link = config.app_link_for(okta_profile)?.ok_or_else(|| {
         anyhow!(
-            "--browser-capture requires app-link in ~/.okta-aws. Run the normal flow once to discover it, or set app-link manually."
+            "--browser requires app-link in ~/.okta-aws. Run the normal flow once to discover it, or set app-link manually."
         )
     })?;
     let chrome = chrome_path()?;
-    let profile_dir = browser_capture_profile_dir()?;
+    let profile_dir = browser_profile_dir()?;
     fs::create_dir_all(&profile_dir)?;
     let mut child = Command::new(&chrome)
         .arg("--remote-debugging-port=0")
@@ -259,10 +259,10 @@ fn chrome_path() -> Result<PathBuf> {
             }
         }
     }
-    bail!("--browser-capture requires Chrome, Chromium, Brave, or Edge")
+    bail!("--browser requires Chrome, Chromium, Brave, or Edge")
 }
 
-fn browser_capture_profile_dir() -> Result<PathBuf> {
+fn browser_profile_dir() -> Result<PathBuf> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
     Ok(std::env::temp_dir().join(format!(
         "okta-awscli-rs-chrome-{}-{now}",

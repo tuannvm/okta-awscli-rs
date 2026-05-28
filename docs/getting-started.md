@@ -82,7 +82,7 @@ okta-awscli-rs --profile prod-admin --refresh-role
 If FastPass works in your browser but not through terminal MFA, use browser capture mode:
 
 ```sh
-okta-awscli-rs --okta-profile default --profile prod-admin --force --browser-capture
+okta-awscli-rs --okta-profile default --profile prod-admin --force --browser
 ```
 
 The profile must have an `app-link`. The CLI launches an isolated Chrome/Chromium-family browser session, opens that link, watches for the AWS SAML POST, captures `SAMLResponse`, and then assumes the AWS role normally.

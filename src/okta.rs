@@ -5,6 +5,7 @@ use reqwest::Client;
 use scraper::{Html, Selector};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::process::Command;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -404,7 +405,15 @@ async fn send_or_verify_app_factor(
         .as_str()
         .ok_or_else(|| anyhow!("factor missing verify link"))?;
     if is_fastpass_factor(factor) {
-        return fastpass_not_available();
+        let flow: Value = client
+            .post(verify)
+            .json(&json!({ "stateToken": state_token }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        launch_fastpass_challenge(client, &flow).await?;
+        return Ok(flow);
     }
     match factor["factorType"].as_str() {
         Some("sms") | Some("call") | Some("push") => Ok(client
@@ -437,14 +446,12 @@ async fn verify_factor(
     let verify = factor["_links"]["verify"]["href"]
         .as_str()
         .ok_or_else(|| anyhow!("factor missing verify link"))?;
-    if is_fastpass_factor(factor) {
-        return fastpass_not_available();
-    }
     let mut req = json!({ "stateToken": state_token });
     if factor["factorType"].as_str() == Some("token:software:totp") {
         req["passCode"] = Value::String(pass_code(totp_token)?);
     }
     let mut resp: Value = client.post(verify).json(&req).send().await?.json().await?;
+    let mut fastpass_launched = false;
     loop {
         match resp["status"].as_str() {
             Some("SUCCESS") => {
@@ -454,7 +461,14 @@ async fn verify_factor(
                     .ok_or_else(|| anyhow!("MFA success response missing sessionToken"));
             }
             Some("MFA_CHALLENGE") if factor["factorType"].as_str() != Some("u2f") => {
-                println!("Waiting for push verification...");
+                if is_fastpass_factor(factor) && !fastpass_launched {
+                    fastpass_launched = launch_fastpass_challenge(client, &resp).await?;
+                }
+                if is_fastpass_factor(factor) {
+                    println!("Waiting for Okta FastPass verification...");
+                } else {
+                    println!("Waiting for push verification...");
+                }
                 match resp["factorResult"].as_str() {
                     Some("TIMEOUT") => bail!("Verification timed out"),
                     Some("REJECTED") => bail!("Verification was rejected"),
@@ -508,6 +522,15 @@ async fn verify_factor(
                     .await?;
             }
             Some("PASSWORD_EXPIRED") => bail!("Your Okta password is expired"),
+            Some("MFA_REQUIRED") if is_fastpass_factor(factor) => {
+                fastpass_launched = launch_fastpass_challenge(client, &resp).await?;
+                let next = resp["_links"]["next"]["href"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("FastPass challenge missing next link"))?
+                    .to_string();
+                sleep(Duration::from_millis(500)).await;
+                resp = client.post(next).json(&req).send().await?.json().await?;
+            }
             other => bail!("MFA verification failed with status {:?}", other),
         }
     }
@@ -670,10 +693,121 @@ fn build_app_factor_name(factor: &Value) -> String {
     }
 }
 
-fn fastpass_not_available<T>() -> Result<T> {
-    bail!(
-        "Okta FastPass was selected, but this release cannot complete Okta's signed-nonce device challenge from the Classic Authn API. Use Okta Verify push for this flow, or configure a future IDX/browser FastPass flow for passwordless Touch ID."
-    )
+async fn launch_fastpass_challenge(client: &Client, response: &Value) -> Result<bool> {
+    let challenge = find_device_challenge(response).ok_or_else(|| {
+        anyhow!(
+            "Okta FastPass was selected, but Okta did not return a launchable device challenge. Run again with --debug and file the redacted MFA_CHALLENGE shape."
+        )
+    })?;
+    let method = challenge["challengeMethod"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    match method.as_str() {
+        "LOOPBACK" => launch_loopback_challenge(client, challenge).await?,
+        "CUSTOM_URI" | "UNIVERSAL_LINK" | "APP_LINK" | "CHROME_DTC" => {
+            let href = challenge["href"]
+                .as_str()
+                .ok_or_else(|| anyhow!("FastPass {method} challenge did not include href"))?;
+            open_url(href)?;
+        }
+        "" => {
+            if let Some(href) = challenge["href"].as_str() {
+                open_url(href)?;
+            } else {
+                bail!("FastPass challenge did not include challengeMethod or href");
+            }
+        }
+        other => bail!("Unsupported FastPass challenge method: {other}"),
+    }
+    Ok(true)
+}
+
+fn find_device_challenge(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Object(map) => {
+            let has_method = map.contains_key("challengeMethod");
+            let has_launch = map.contains_key("href") || map.contains_key("challengeRequest");
+            if has_method && has_launch {
+                return Some(value);
+            }
+            for child in map.values() {
+                if let Some(found) = find_device_challenge(child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(values) => values.iter().find_map(find_device_challenge),
+        _ => None,
+    }
+}
+
+async fn launch_loopback_challenge(client: &Client, challenge: &Value) -> Result<()> {
+    let challenge_request = challenge["challengeRequest"]
+        .as_str()
+        .ok_or_else(|| anyhow!("FastPass loopback challenge did not include challengeRequest"))?;
+    let ports = challenge["ports"]
+        .as_array()
+        .ok_or_else(|| anyhow!("FastPass loopback challenge did not include ports"))?;
+    let mut bases = Vec::new();
+    if let Some(https_domain) = challenge["httpsDomain"].as_str() {
+        bases.push(https_domain);
+    }
+    if let Some(domain) = challenge["domain"].as_str() {
+        bases.push(domain);
+    }
+    if bases.is_empty() {
+        bail!("FastPass loopback challenge did not include a domain");
+    }
+
+    for base in bases {
+        for port in ports {
+            let Some(port) = port.as_u64() else {
+                continue;
+            };
+            let probe = format!("{base}:{port}/probe");
+            if client
+                .get(&probe)
+                .timeout(Duration::from_millis(750))
+                .send()
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            let challenge_url = format!("{base}:{port}/challenge");
+            let result = client
+                .post(&challenge_url)
+                .timeout(Duration::from_secs(300))
+                .json(&json!({ "challengeRequest": challenge_request }))
+                .send()
+                .await;
+            match result {
+                Ok(resp) if resp.status().is_success() => {
+                    println!("Opened Okta FastPass challenge through local Okta Verify.");
+                    return Ok(());
+                }
+                Ok(resp) if resp.status().as_u16() == 503 => continue,
+                Ok(resp) => bail!(
+                    "Okta Verify rejected the FastPass challenge with {}",
+                    resp.status()
+                ),
+                Err(_) => continue,
+            }
+        }
+    }
+    bail!("Unable to contact local Okta Verify for the FastPass loopback challenge")
+}
+
+fn open_url(href: &str) -> Result<()> {
+    println!("Opening Okta Verify for FastPass...");
+    let status = Command::new("open").arg(href).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("failed to open Okta Verify challenge URL")
+    }
 }
 
 fn pass_code(totp_token: Option<&str>) -> Result<String> {
@@ -787,5 +921,24 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("Okta FastPass was requested"));
         assert!(err.to_string().contains("Okta Verify - TOTP"));
+    }
+
+    #[test]
+    fn finds_nested_device_challenge() {
+        let response = json!({
+            "status": "MFA_CHALLENGE",
+            "_embedded": {
+                "factor": {
+                    "_embedded": {
+                        "challenge": {
+                            "challengeMethod": "APP_LINK",
+                            "href": "okta-verify://challenge"
+                        }
+                    }
+                }
+            }
+        });
+        let challenge = find_device_challenge(&response).unwrap();
+        assert_eq!(challenge["challengeMethod"].as_str(), Some("APP_LINK"));
     }
 }

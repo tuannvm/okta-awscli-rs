@@ -311,6 +311,11 @@ exit(1)
     let value: serde_json::Value =
         serde_json::from_str(stdout.trim()).context("parsing macOS WebAuthn output")?;
     if let Some(error) = value["error"].as_str() {
+        if error.contains("application identifier") {
+            bail!(
+                "macOS rejected the platform WebAuthn request because this CLI has no signed application identifier entitlement. Touch ID/passkey WebAuthn for this Okta factor must run through a signed app or browser-associated flow. Use Okta Verify push, an external FIDO security key with OKTA_AWSCLI_ALLOW_EXTERNAL_FIDO_FALLBACK=1, or a future signed helper app."
+            );
+        }
         bail!("macOS WebAuthn helper failed: {error}");
     }
     Ok(value)

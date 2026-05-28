@@ -489,12 +489,16 @@ fn choose_factor<'a>(
     heading: &str,
     name_fn: fn(&Value) -> String,
 ) -> Result<&'a Value> {
-    if let Some(provider) = preferred_provider {
+    if let Some(preference) = preferred_provider {
         return factors
             .iter()
             .copied()
-            .find(|factor| factor["provider"].as_str() == Some(provider))
-            .ok_or_else(|| anyhow!("Unable to locate selected factor provider {provider}"));
+            .filter(|factor| factor_matches_preference(factor, preference))
+            .min_by_key(|factor| factor_rank(factor))
+            .ok_or_else(|| anyhow!("Unable to locate selected factor preference {preference}"));
+    }
+    if let Some(push) = single_push_factor(factors) {
+        return Ok(push);
     }
     if factors.len() == 1 {
         return Ok(factors[0]);
@@ -508,13 +512,63 @@ fn choose_factor<'a>(
 
 fn build_base_factor_name(factor: &Value) -> String {
     match (factor["provider"].as_str(), factor["factorType"].as_str()) {
-        (Some("GOOGLE"), _) => "Google Authenticator".to_string(),
-        (Some("OKTA"), Some("push")) => "Okta Verify - Push".to_string(),
-        (Some("OKTA"), _) => "Okta Verify".to_string(),
-        (Some("FIDO"), _) => "u2f".to_string(),
+        (Some("GOOGLE"), _) => with_profile(factor, "Google Authenticator"),
+        (Some("OKTA"), Some("push")) => with_profile(factor, "Okta Verify - Push"),
+        (Some("OKTA"), Some("token:software:totp")) => with_profile(factor, "Okta Verify - TOTP"),
+        (Some("OKTA"), Some(factor_type)) => {
+            with_profile(factor, &format!("Okta Verify - {factor_type}"))
+        }
+        (Some("FIDO"), _) => with_profile(factor, "U2F security key"),
         (Some(provider), _) => format!("Unsupported factor type: {provider}"),
         _ => "Unknown MFA factor".to_string(),
     }
+}
+
+fn factor_matches_preference(factor: &Value, preference: &str) -> bool {
+    let preference = preference.to_ascii_uppercase().replace('-', "_");
+    let provider = factor["provider"].as_str().unwrap_or_default();
+    let factor_type = factor["factorType"].as_str().unwrap_or_default();
+    match preference.as_str() {
+        "PUSH" | "OKTA_PUSH" => provider == "OKTA" && factor_type == "push",
+        "TOTP" | "OKTA_TOTP" => provider == "OKTA" && factor_type == "token:software:totp",
+        "GOOGLE" | "GOOGLE_TOTP" => provider == "GOOGLE",
+        "U2F" | "FIDO" => factor_type == "u2f" || provider == "FIDO",
+        _ => provider == preference,
+    }
+}
+
+fn single_push_factor<'a>(factors: &[&'a Value]) -> Option<&'a Value> {
+    let mut push_factors = factors
+        .iter()
+        .copied()
+        .filter(|factor| factor["factorType"].as_str() == Some("push"));
+    let push = push_factors.next()?;
+    if push_factors.next().is_none() {
+        Some(push)
+    } else {
+        None
+    }
+}
+
+fn factor_rank(factor: &Value) -> u8 {
+    match factor["factorType"].as_str() {
+        Some("push") => 0,
+        Some("u2f") => 1,
+        Some("token:software:totp") => 2,
+        _ => 3,
+    }
+}
+
+fn with_profile(factor: &Value, label: &str) -> String {
+    let profile = &factor["profile"];
+    for key in ["name", "deviceType", "credentialId", "phoneNumber"] {
+        if let Some(value) = profile[key].as_str()
+            && !value.is_empty()
+        {
+            return format!("{label} ({value})");
+        }
+    }
+    label.to_string()
 }
 
 fn build_app_factor_name(factor: &Value) -> String {
@@ -583,5 +637,41 @@ mod tests {
     fn extracts_saml_response_input() {
         let html = r#"<html><input name="SAMLResponse" value="abc123"></html>"#;
         assert_eq!(simple_assertion(html).as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn okta_preference_picks_push_before_totp() {
+        let totp = json!({
+            "provider": "OKTA",
+            "factorType": "token:software:totp",
+            "profile": { "credentialId": "user@example.com" }
+        });
+        let push = json!({
+            "provider": "OKTA",
+            "factorType": "push",
+            "profile": { "name": "iPhone" }
+        });
+        let factors = vec![&totp, &push];
+        let selected = choose_factor(
+            &factors,
+            Some("OKTA"),
+            "Registered MFA factors:",
+            build_base_factor_name,
+        )
+        .unwrap();
+        assert_eq!(selected["factorType"].as_str(), Some("push"));
+    }
+
+    #[test]
+    fn factor_name_includes_type_and_profile() {
+        let factor = json!({
+            "provider": "OKTA",
+            "factorType": "token:software:totp",
+            "profile": { "credentialId": "user@example.com" }
+        });
+        assert_eq!(
+            build_base_factor_name(&factor),
+            "Okta Verify - TOTP (user@example.com)"
+        );
     }
 }

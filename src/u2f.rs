@@ -18,6 +18,15 @@ pub struct U2fChallenge {
     pub challenge: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct WebAuthnChallenge {
+    pub origin: String,
+    pub relying_party_id: String,
+    pub credential_id: String,
+    pub challenge: String,
+    pub user_verification: String,
+}
+
 pub fn authenticate(challenge: &U2fChallenge) -> Result<serde_json::Value> {
     let client_data = json!({
         "typ": "navigator.id.getAssertion",
@@ -68,6 +77,65 @@ pub fn authenticate(challenge: &U2fChallenge) -> Result<serde_json::Value> {
         "clientData": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(client_data.as_bytes()),
         "signatureData": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature_data),
         "keyHandle": challenge.key_handle,
+    }))
+}
+
+pub fn authenticate_webauthn(challenge: &WebAuthnChallenge) -> Result<serde_json::Value> {
+    let client_data = json!({
+        "type": "webauthn.get",
+        "challenge": challenge.challenge,
+        "origin": challenge.origin,
+        "crossOrigin": false,
+    })
+    .to_string();
+    let client_data_hash: [u8; 32] = Sha256::digest(client_data.as_bytes()).into();
+    let credential_id = decode_b64(&challenge.credential_id)?;
+    let user_verification_req = match challenge.user_verification.to_ascii_lowercase().as_str() {
+        "required" => UserVerificationRequirement::Required,
+        "discouraged" => UserVerificationRequirement::Discouraged,
+        _ => UserVerificationRequirement::Preferred,
+    };
+
+    let args = SignArgs {
+        client_data_hash,
+        origin: challenge.origin.clone(),
+        relying_party_id: challenge.relying_party_id.clone(),
+        allow_list: vec![PublicKeyCredentialDescriptor {
+            id: credential_id,
+            transports: vec![
+                Transport::USB,
+                Transport::NFC,
+                Transport::BLE,
+                Transport::Internal,
+            ],
+        }],
+        user_verification_req,
+        user_presence_req: true,
+        extensions: AuthenticationExtensionsClientInputs::default(),
+        pin: None,
+        use_ctap1_fallback: false,
+    };
+
+    let mut service = AuthenticatorService::new().map_err(|err| anyhow!("{err}"))?;
+    service.add_detected_transports();
+    let (status_tx, _status_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let callback = StateCallback::new(Box::new(move |result| {
+        let _ = result_tx.send(result);
+    }));
+    println!("Please approve the WebAuthn security key or platform authenticator prompt...");
+    service
+        .sign(60_000, args, status_tx, callback)
+        .map_err(|err| anyhow!("{err}"))?;
+    let result = result_rx
+        .recv_timeout(Duration::from_secs(65))
+        .context("timed out waiting for WebAuthn authenticator")?
+        .map_err(|err| anyhow!("{err}"))?;
+    Ok(json!({
+        "clientData": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(client_data.as_bytes()),
+        "authenticatorData": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(result.assertion.auth_data.to_vec()),
+        "signatureData": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(result.assertion.signature),
+        "credentialId": challenge.credential_id,
     }))
 }
 

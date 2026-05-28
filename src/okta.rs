@@ -141,6 +141,7 @@ impl OktaAuth {
                     self.factor.as_deref(),
                     self.token.as_deref(),
                     self.require_fastpass,
+                    &self.base_url,
                 )
                 .await
             }
@@ -270,6 +271,7 @@ async fn verify_base_mfa(
     preferred_provider: Option<&str>,
     totp_token: Option<&str>,
     require_fastpass: bool,
+    origin: &str,
 ) -> Result<String> {
     let mut supported: Vec<&Value> = factors
         .iter()
@@ -317,7 +319,7 @@ async fn verify_base_mfa(
                 .join(", ")
         );
     }
-    verify_factor(client, state_token, selected, totp_token).await
+    verify_factor(client, state_token, selected, totp_token, origin).await
 }
 
 async fn stepup_auth(
@@ -442,6 +444,7 @@ async fn verify_factor(
     state_token: &str,
     factor: &Value,
     totp_token: Option<&str>,
+    origin: &str,
 ) -> Result<String> {
     let verify = factor["_links"]["verify"]["href"]
         .as_str()
@@ -461,6 +464,29 @@ async fn verify_factor(
                     .ok_or_else(|| anyhow!("MFA success response missing sessionToken"));
             }
             Some("MFA_CHALLENGE") if factor["factorType"].as_str() != Some("u2f") => {
+                if is_webauthn_factor(factor) {
+                    let auth_response =
+                        crate::u2f::authenticate_webauthn(&webauthn_challenge(&resp, origin)?)?;
+                    let next = resp["_links"]["next"]["href"]
+                        .as_str()
+                        .ok_or_else(|| anyhow!("WebAuthn challenge missing next link"))?;
+                    let mut webauthn_req = req.clone();
+                    if let Some(map) = webauthn_req.as_object_mut()
+                        && let Some(auth_map) = auth_response.as_object()
+                    {
+                        for (key, value) in auth_map {
+                            map.insert(key.clone(), value.clone());
+                        }
+                    }
+                    resp = client
+                        .post(next)
+                        .json(&webauthn_req)
+                        .send()
+                        .await?
+                        .json()
+                        .await?;
+                    continue;
+                }
                 if is_fastpass_factor(factor) && !fastpass_launched {
                     fastpass_launched = launch_fastpass_challenge(client, &resp).await?;
                 }
@@ -620,6 +646,10 @@ fn is_fastpass_factor(factor: &Value) -> bool {
         factor["factorType"].as_str(),
         Some("signed_nonce") | Some("webauthn")
     ) && (provider.is_empty() || provider == "OKTA" || provider == "FIDO")
+}
+
+fn is_webauthn_factor(factor: &Value) -> bool {
+    factor["factorType"].as_str() == Some("webauthn")
 }
 
 fn single_push_factor<'a>(factors: &[&'a Value]) -> Option<&'a Value> {
@@ -812,6 +842,30 @@ fn open_url(href: &str) -> Result<()> {
     } else {
         bail!("failed to open Okta Verify challenge URL")
     }
+}
+
+fn webauthn_challenge(response: &Value, origin: &str) -> Result<crate::u2f::WebAuthnChallenge> {
+    let challenge = response["_embedded"]["factor"]["_embedded"]["challenge"]["challenge"]
+        .as_str()
+        .ok_or_else(|| anyhow!("WebAuthn challenge missing challenge value"))?;
+    let credential_id = response["_embedded"]["factor"]["profile"]["credentialId"]
+        .as_str()
+        .ok_or_else(|| anyhow!("WebAuthn challenge missing credentialId"))?;
+    let user_verification =
+        response["_embedded"]["factor"]["_embedded"]["challenge"]["userVerification"]
+            .as_str()
+            .unwrap_or("preferred");
+    let relying_party_id = url::Url::parse(origin)?
+        .host_str()
+        .ok_or_else(|| anyhow!("Okta origin missing host"))?
+        .to_string();
+    Ok(crate::u2f::WebAuthnChallenge {
+        origin: origin.to_string(),
+        relying_party_id,
+        credential_id: credential_id.to_string(),
+        challenge: challenge.to_string(),
+        user_verification: user_verification.to_string(),
+    })
 }
 
 fn redacted_json(value: &Value) -> Value {
@@ -1041,5 +1095,30 @@ mod tests {
             redacted["_embedded"]["factor"]["_embedded"]["challenge"]["href"].as_str(),
             Some("<redacted>")
         );
+    }
+
+    #[test]
+    fn builds_webauthn_challenge_from_okta_response() {
+        let response = json!({
+            "_embedded": {
+                "factor": {
+                    "profile": {
+                        "credentialId": "credential"
+                    },
+                    "_embedded": {
+                        "challenge": {
+                            "challenge": "challenge",
+                            "userVerification": "required"
+                        }
+                    }
+                }
+            }
+        });
+        let challenge = webauthn_challenge(&response, "https://example.okta.com").unwrap();
+        assert_eq!(challenge.origin, "https://example.okta.com");
+        assert_eq!(challenge.relying_party_id, "example.okta.com");
+        assert_eq!(challenge.credential_id, "credential");
+        assert_eq!(challenge.challenge, "challenge");
+        assert_eq!(challenge.user_verification, "required");
     }
 }

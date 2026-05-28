@@ -1,0 +1,587 @@
+use anyhow::{Result, anyhow, bail};
+use base64::Engine;
+use regex::Regex;
+use reqwest::Client;
+use scraper::{Html, Selector};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::time::Duration;
+use tokio::time::sleep;
+
+use crate::config::OktaConfig;
+
+#[derive(Clone, Debug)]
+pub struct OktaAuth {
+    client: Client,
+    base_url: String,
+    auth_url: String,
+    okta_profile: String,
+    factor: Option<String>,
+    app_link: Option<String>,
+    username: String,
+    password: String,
+    token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthnResponse {
+    status: Option<String>,
+    #[serde(rename = "stateToken")]
+    state_token: Option<String>,
+    #[serde(rename = "sessionToken")]
+    session_token: Option<String>,
+    #[serde(rename = "_embedded")]
+    embedded: Option<Embedded>,
+    #[serde(rename = "errorSummary")]
+    error_summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Embedded {
+    factors: Option<Vec<Value>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AppLink {
+    #[serde(rename = "appName")]
+    app_name: String,
+    label: String,
+    #[serde(rename = "linkUrl")]
+    link_url: String,
+    #[serde(rename = "sortOrder")]
+    sort_order: i64,
+}
+
+impl OktaAuth {
+    pub fn new(
+        config: &OktaConfig,
+        okta_profile: &str,
+        username: String,
+        password: String,
+        token: Option<String>,
+    ) -> Result<Self> {
+        let configured_base = config.base_url_for(okta_profile)?;
+        let base_url =
+            if configured_base.starts_with("http://") || configured_base.starts_with("https://") {
+                configured_base
+            } else {
+                format!("https://{configured_base}")
+            };
+        Ok(Self {
+            client: Client::builder()
+                .cookie_store(true)
+                .user_agent(format!("okta-awscli-rs/{}", crate::VERSION))
+                .build()?,
+            auth_url: format!("{base_url}/api/v1/authn"),
+            base_url,
+            okta_profile: okta_profile.to_string(),
+            factor: config.factor_for(okta_profile),
+            app_link: config.app_link_for(okta_profile)?,
+            username,
+            password,
+            token,
+        })
+    }
+
+    pub async fn get_assertion(
+        &mut self,
+        config: &mut OktaConfig,
+    ) -> Result<(Option<String>, String)> {
+        let session_token = self.primary_auth().await?;
+        let session_id = self.get_session(&session_token).await?;
+        let (app_name, app_link) = if let Some(link) = &self.app_link {
+            (None, link.clone())
+        } else {
+            let selected = self.get_apps(&session_id).await?;
+            config.write_applink_to_profile(&self.okta_profile, &selected.1)?;
+            self.app_link = Some(selected.1.clone());
+            (Some(selected.0), selected.1)
+        };
+        let sid_cookie = format!("sid={session_id}");
+        let html = self
+            .client
+            .get(&app_link)
+            .header("Cookie", sid_cookie)
+            .send()
+            .await?
+            .text()
+            .await?;
+        Ok((app_name, self.get_saml_assertion(&html, &session_id).await?))
+    }
+
+    async fn primary_auth(&self) -> Result<String> {
+        let resp = self
+            .client
+            .post(&self.auth_url)
+            .json(&json!({
+                "username": self.username,
+                "password": self.password,
+            }))
+            .send()
+            .await?;
+        let status = resp.status();
+        let body: AuthnResponse = resp.json().await?;
+        match body.status.as_deref() {
+            Some("SUCCESS") => body
+                .session_token
+                .ok_or_else(|| anyhow!("Okta SUCCESS response did not include sessionToken")),
+            Some("MFA_REQUIRED") => {
+                let factors = body.embedded.and_then(|e| e.factors).unwrap_or_default();
+                let state_token = body.state_token.ok_or_else(|| {
+                    anyhow!("Okta MFA_REQUIRED response did not include stateToken")
+                })?;
+                verify_base_mfa(
+                    &self.client,
+                    &state_token,
+                    &factors,
+                    self.factor.as_deref(),
+                    self.token.as_deref(),
+                )
+                .await
+            }
+            Some("MFA_ENROLL") => {
+                bail!("MFA not enrolled. Please enroll an MFA factor in the Okta Web UI first.")
+            }
+            Some("LOCKED_OUT") => bail!("Account is locked. Please contact your administrator."),
+            Some(other) => bail!("Unsupported Okta authentication status: {other}"),
+            None if !status.is_success() => bail!(
+                "{}",
+                body.error_summary
+                    .unwrap_or_else(|| format!("Okta authentication failed with {status}"))
+            ),
+            None => bail!("Okta authentication failed: missing status"),
+        }
+    }
+
+    async fn get_session(&self, session_token: &str) -> Result<String> {
+        let value: Value = self
+            .client
+            .post(format!("{}/api/v1/sessions", self.base_url))
+            .json(&json!({ "sessionToken": session_token }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        value["id"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("Okta session response did not include id"))
+    }
+
+    async fn get_apps(&self, session_id: &str) -> Result<(String, String)> {
+        let sid = format!("sid={session_id}");
+        let mut apps: Vec<AppLink> = self
+            .client
+            .get(format!("{}/api/v1/users/me/appLinks", self.base_url))
+            .header("Cookie", sid)
+            .send()
+            .await?
+            .json()
+            .await?;
+        apps.retain(|app| app.app_name == "amazon_aws");
+        if apps.is_empty() {
+            bail!("No AWS apps are available for your user.");
+        }
+        apps.sort_by_key(|app| app.sort_order);
+        let selected = if apps.len() == 1 {
+            0
+        } else {
+            println!("Available apps:");
+            for (index, app) in apps.iter().enumerate() {
+                println!("{}: {}", index + 1, app.label);
+            }
+            prompt_index("Please select AWS app", apps.len())?
+        };
+        Ok((
+            apps[selected].label.clone(),
+            apps[selected].link_url.clone(),
+        ))
+    }
+
+    async fn get_saml_assertion(&self, html: &str, session_id: &str) -> Result<String> {
+        if let Some(assertion) = simple_assertion(html) {
+            return Ok(assertion);
+        }
+        self.get_mfa_assertion(html, session_id)
+            .await?
+            .ok_or_else(|| anyhow!("SAML assertion not valid"))
+    }
+
+    async fn get_mfa_assertion(&self, html: &str, session_id: &str) -> Result<Option<String>> {
+        let document = Html::parse_document(html);
+        let title_selector = Selector::parse("title").unwrap();
+        let title = document
+            .select(&title_selector)
+            .next()
+            .map(|node| node.text().collect::<String>())
+            .unwrap_or_default();
+        if !title.ends_with(" - Extra Verification") {
+            return Ok(None);
+        }
+        let re = Regex::new(r#"var stateToken = '(.*)';"#)?;
+        let state_token = re
+            .captures(html)
+            .and_then(|caps| caps.get(1))
+            .map(|m| html_escape::decode_html_entities(m.as_str()).to_string())
+            .ok_or_else(|| anyhow!("Extra Verification page did not include a stateToken"))?;
+        let _ = stepup_auth(
+            &self.client,
+            &self.auth_url,
+            &state_token,
+            self.factor.as_deref(),
+            self.token.as_deref(),
+        )
+        .await?;
+        let app_link = self
+            .app_link
+            .as_ref()
+            .ok_or_else(|| anyhow!("app-link required for app MFA assertion retry"))?;
+        let retry = self
+            .client
+            .get(app_link)
+            .header("Cookie", format!("sid={session_id}"))
+            .send()
+            .await?
+            .text()
+            .await?;
+        Ok(simple_assertion(&retry))
+    }
+}
+
+pub fn simple_assertion(html: &str) -> Option<String> {
+    let document = Html::parse_document(html);
+    let selector = Selector::parse(r#"input[name="SAMLResponse"]"#).ok()?;
+    document
+        .select(&selector)
+        .next()
+        .and_then(|node| node.value().attr("value"))
+        .map(str::to_string)
+}
+
+async fn verify_base_mfa(
+    client: &Client,
+    state_token: &str,
+    factors: &[Value],
+    preferred_provider: Option<&str>,
+    totp_token: Option<&str>,
+) -> Result<String> {
+    let mut supported: Vec<&Value> = factors
+        .iter()
+        .filter(|factor| {
+            matches!(
+                factor["factorType"].as_str(),
+                Some("token:software:totp") | Some("push") | Some("u2f")
+            )
+        })
+        .collect();
+    supported.sort_by_key(|factor| {
+        (
+            factor["provider"].as_str().unwrap_or_default().to_string(),
+            factor["factorType"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        )
+    });
+    if supported.is_empty() {
+        bail!("MFA required, but no supported factors enrolled.");
+    }
+    let selected = choose_factor(
+        &supported,
+        preferred_provider,
+        "Registered MFA factors:",
+        build_base_factor_name,
+    )?;
+    verify_factor(client, state_token, selected, totp_token).await
+}
+
+async fn stepup_auth(
+    client: &Client,
+    auth_url: &str,
+    state_token: &str,
+    preferred_provider: Option<&str>,
+    totp_token: Option<&str>,
+) -> Result<Value> {
+    let mut flow = client
+        .post(auth_url)
+        .json(&json!({ "stateToken": state_token }))
+        .send()
+        .await?
+        .json::<Value>()
+        .await?;
+    let mut current_state = state_token.to_string();
+    while flow["status"].as_str() != Some("SUCCESS") {
+        match flow["status"].as_str() {
+            Some("MFA_REQUIRED") => {
+                let factors = flow["_embedded"]["factors"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let refs: Vec<&Value> = factors.iter().collect();
+                let factor = choose_factor(
+                    &refs,
+                    preferred_provider,
+                    "Multi-factor Authentication required for application.\nPick a factor:",
+                    build_app_factor_name,
+                )?;
+                flow =
+                    send_or_verify_app_factor(client, &current_state, factor, totp_token).await?;
+            }
+            Some("MFA_CHALLENGE") if flow["factorResult"].as_str() == Some("WAITING") => {
+                sleep(Duration::from_secs(1)).await;
+                let next = flow["_links"]["next"]["href"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("MFA challenge missing next link"))?;
+                flow = client
+                    .post(next)
+                    .json(&json!({ "stateToken": current_state }))
+                    .send()
+                    .await?
+                    .json()
+                    .await?;
+            }
+            Some("MFA_CHALLENGE") => {
+                let next = flow["_links"]["next"]["href"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("MFA challenge missing next link"))?;
+                let pass_code = pass_code(totp_token)?;
+                flow = client
+                    .post(next)
+                    .json(&json!({ "stateToken": current_state, "passCode": pass_code }))
+                    .send()
+                    .await?
+                    .json()
+                    .await?;
+            }
+            Some("UNAUTHENTICATED") => {
+                bail!("You are not authenticated -- please try to log in again")
+            }
+            Some("LOCKED_OUT") => {
+                bail!("Your Okta access has been locked out due to failed login attempts.")
+            }
+            Some("MFA_ENROLL") => bail!("You must enroll in MFA before using this tool."),
+            Some(status) => bail!("Unknown login status: {status}"),
+            None => bail!("Okta step-up response did not include status"),
+        }
+        if let Some(next_state) = flow["stateToken"].as_str() {
+            current_state = next_state.to_string();
+        }
+    }
+    Ok(flow)
+}
+
+async fn send_or_verify_app_factor(
+    client: &Client,
+    state_token: &str,
+    factor: &Value,
+    totp_token: Option<&str>,
+) -> Result<Value> {
+    let verify = factor["_links"]["verify"]["href"]
+        .as_str()
+        .ok_or_else(|| anyhow!("factor missing verify link"))?;
+    match factor["factorType"].as_str() {
+        Some("sms") | Some("call") | Some("push") => Ok(client
+            .post(verify)
+            .json(&json!({ "stateToken": state_token }))
+            .send()
+            .await?
+            .json()
+            .await?),
+        Some("token:software:totp") | Some("token") => {
+            let pass_code = pass_code(totp_token)?;
+            Ok(client
+                .post(verify)
+                .json(&json!({ "stateToken": state_token, "passCode": pass_code }))
+                .send()
+                .await?
+                .json()
+                .await?)
+        }
+        other => bail!("Unsupported app MFA factor: {:?}", other),
+    }
+}
+
+async fn verify_factor(
+    client: &Client,
+    state_token: &str,
+    factor: &Value,
+    totp_token: Option<&str>,
+) -> Result<String> {
+    let verify = factor["_links"]["verify"]["href"]
+        .as_str()
+        .ok_or_else(|| anyhow!("factor missing verify link"))?;
+    let mut req = json!({ "stateToken": state_token });
+    if factor["factorType"].as_str() == Some("token:software:totp") {
+        req["passCode"] = Value::String(pass_code(totp_token)?);
+    }
+    let mut resp: Value = client.post(verify).json(&req).send().await?.json().await?;
+    loop {
+        match resp["status"].as_str() {
+            Some("SUCCESS") => {
+                return resp["sessionToken"]
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow!("MFA success response missing sessionToken"));
+            }
+            Some("MFA_CHALLENGE") if factor["factorType"].as_str() != Some("u2f") => {
+                println!("Waiting for push verification...");
+                match resp["factorResult"].as_str() {
+                    Some("TIMEOUT") => bail!("Verification timed out"),
+                    Some("REJECTED") => bail!("Verification was rejected"),
+                    _ => {}
+                }
+                if let Some(correct) =
+                    resp["_embedded"]["factor"]["_embedded"]["challenge"]["correctAnswer"].as_str()
+                {
+                    println!("On your phone, tap {correct} in the Okta Verify app");
+                }
+                let next = resp["_links"]["next"]["href"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("MFA challenge missing next link"))?
+                    .to_string();
+                sleep(Duration::from_millis(500)).await;
+                resp = client.post(next).json(&req).send().await?.json().await?;
+            }
+            Some("MFA_CHALLENGE") => {
+                let challenge = crate::u2f::U2fChallenge {
+                    app_id: resp["_embedded"]["factor"]["profile"]["appId"]
+                        .as_str()
+                        .ok_or_else(|| anyhow!("U2F challenge missing appId"))?
+                        .to_string(),
+                    key_handle: resp["_embedded"]["factor"]["profile"]["credentialId"]
+                        .as_str()
+                        .ok_or_else(|| anyhow!("U2F challenge missing credentialId"))?
+                        .to_string(),
+                    challenge: resp["_embedded"]["factor"]["_embedded"]["challenge"]["nonce"]
+                        .as_str()
+                        .ok_or_else(|| anyhow!("U2F challenge missing nonce"))?
+                        .to_string(),
+                };
+                let auth_response = crate::u2f::authenticate(&challenge)?;
+                let next = resp["_links"]["next"]["href"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("U2F challenge missing next link"))?;
+                let mut u2f_req = req.clone();
+                if let Some(map) = u2f_req.as_object_mut()
+                    && let Some(auth_map) = auth_response.as_object()
+                {
+                    for (key, value) in auth_map {
+                        map.insert(key.clone(), value.clone());
+                    }
+                }
+                resp = client
+                    .post(next)
+                    .json(&u2f_req)
+                    .send()
+                    .await?
+                    .json()
+                    .await?;
+            }
+            Some("PASSWORD_EXPIRED") => bail!("Your Okta password is expired"),
+            other => bail!("MFA verification failed with status {:?}", other),
+        }
+    }
+}
+
+fn choose_factor<'a>(
+    factors: &[&'a Value],
+    preferred_provider: Option<&str>,
+    heading: &str,
+    name_fn: fn(&Value) -> String,
+) -> Result<&'a Value> {
+    if let Some(provider) = preferred_provider {
+        return factors
+            .iter()
+            .copied()
+            .find(|factor| factor["provider"].as_str() == Some(provider))
+            .ok_or_else(|| anyhow!("Unable to locate selected factor provider {provider}"));
+    }
+    if factors.len() == 1 {
+        return Ok(factors[0]);
+    }
+    println!("{heading}");
+    for (index, factor) in factors.iter().enumerate() {
+        println!("{}: {}", index + 1, name_fn(factor));
+    }
+    Ok(factors[prompt_index("Please select the MFA factor", factors.len())?])
+}
+
+fn build_base_factor_name(factor: &Value) -> String {
+    match (factor["provider"].as_str(), factor["factorType"].as_str()) {
+        (Some("GOOGLE"), _) => "Google Authenticator".to_string(),
+        (Some("OKTA"), Some("push")) => "Okta Verify - Push".to_string(),
+        (Some("OKTA"), _) => "Okta Verify".to_string(),
+        (Some("FIDO"), _) => "u2f".to_string(),
+        (Some(provider), _) => format!("Unsupported factor type: {provider}"),
+        _ => "Unknown MFA factor".to_string(),
+    }
+}
+
+fn build_app_factor_name(factor: &Value) -> String {
+    match factor["factorType"].as_str() {
+        Some("push") => format!(
+            "Okta Verify App: {}: {}",
+            factor["profile"]["deviceType"]
+                .as_str()
+                .unwrap_or("unknown"),
+            factor["profile"]["name"].as_str().unwrap_or("unknown")
+        ),
+        Some("sms") | Some("call") => format!(
+            "{}: {}",
+            factor["factorType"].as_str().unwrap(),
+            factor["profile"]["phoneNumber"]
+                .as_str()
+                .unwrap_or("unknown")
+        ),
+        Some("token:software:totp") => format!(
+            "token:software:totp( {} ) : {}",
+            factor["provider"].as_str().unwrap_or("unknown"),
+            factor["profile"]["credentialId"]
+                .as_str()
+                .unwrap_or("unknown")
+        ),
+        Some("token") => format!(
+            "token: {}",
+            factor["profile"]["credentialId"]
+                .as_str()
+                .unwrap_or("unknown")
+        ),
+        Some(other) => format!("Unknown MFA type: {other}"),
+        None => "Unknown MFA type".to_string(),
+    }
+}
+
+fn pass_code(totp_token: Option<&str>) -> Result<String> {
+    Ok(match totp_token {
+        Some(token) => token.to_string(),
+        None => dialoguer::Input::new()
+            .with_prompt("Enter MFA verification code")
+            .interact_text()?,
+    })
+}
+
+fn prompt_index(prompt: &str, len: usize) -> Result<usize> {
+    let selection: usize = dialoguer::Input::new()
+        .with_prompt(prompt)
+        .interact_text()?;
+    if selection == 0 || selection > len {
+        bail!("Invalid selection");
+    }
+    Ok(selection - 1)
+}
+
+pub fn decode_roles_from_assertion(assertion: &str) -> Result<Vec<(String, String)>> {
+    let xml = base64::engine::general_purpose::STANDARD.decode(assertion)?;
+    crate::aws::extract_available_roles_from_xml(&xml)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_saml_response_input() {
+        let html = r#"<html><input name="SAMLResponse" value="abc123"></html>"#;
+        assert_eq!(simple_assertion(html).as_deref(), Some("abc123"));
+    }
+}

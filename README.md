@@ -1,0 +1,128 @@
+# okta-awscli-rs
+
+`okta-awscli-rs` signs in to Okta, retrieves an AWS SAML assertion, exchanges it for temporary AWS STS credentials, and optionally runs `aws` with those credentials.
+
+It is a Rust reimplementation of the Python `okta-awscli` workflow with the same config file shape and CLI habits, plus macOS Touch ID-assisted password unlock.
+
+## What It Does
+
+- Reuses `~/.okta-aws` profiles from the Python tool.
+- Authenticates with Okta Classic Authn.
+- Supports TOTP, Okta Verify push, app-level MFA, SMS/call app MFA, and U2F security keys.
+- Discovers Okta AWS app links when `app-link` is not configured.
+- Extracts the AWS SAML response and calls AWS STS `AssumeRoleWithSAML`.
+- Writes temporary credentials to `~/.aws/credentials` or `AWS_SHARED_CREDENTIALS_FILE`.
+- Runs `aws --profile <profile> ...` when AWS CLI arguments are provided.
+- Can store the Okta password in macOS Keychain and require Touch ID before reading it.
+
+## Install
+
+```sh
+cargo install --path .
+```
+
+For local development:
+
+```sh
+cargo build
+```
+
+The package binary is `okta-awscli-rs`. The CLI name in help output is `okta-awscli` for compatibility with the original tool.
+
+## Quick Start
+
+Create or update an Okta profile:
+
+```sh
+okta-awscli-rs --config
+```
+
+Authenticate and write temporary AWS credentials:
+
+```sh
+okta-awscli-rs --okta-profile default --profile my-aws-profile
+```
+
+Authenticate, refresh credentials if needed, and run the AWS CLI:
+
+```sh
+okta-awscli-rs --profile my-aws-profile sts get-caller-identity
+okta-awscli-rs --profile my-aws-profile iam list-users
+```
+
+Use a TOTP code without waiting for an interactive prompt:
+
+```sh
+okta-awscli-rs --profile my-aws-profile --token 123456
+```
+
+## Configuration
+
+The config file is `~/.okta-aws`:
+
+```ini
+[default]
+base-url = example.okta.com
+username = user@example.com
+factor = OKTA
+profile = my-aws-profile
+duration = 3600
+```
+
+Common optional fields:
+
+- `password`: Okta password. Avoid storing this in plaintext when possible.
+- `app-link`: Okta AWS app link. If omitted, the tool discovers AWS apps from Okta.
+- `role`: AWS role ARN. If omitted, the tool prompts you to choose a role.
+- `factor`: preferred MFA provider, usually `OKTA` or `GOOGLE`.
+
+See [docs/configuration.md](docs/configuration.md) for the full config reference.
+
+## macOS Touch ID
+
+Store the Okta password in Keychain:
+
+```sh
+okta-awscli-rs --store-touch-id --username user@example.com
+```
+
+Use Touch ID before reading the stored password:
+
+```sh
+okta-awscli-rs --touch-id --username user@example.com --profile my-aws-profile
+```
+
+Touch ID is an application-level gate before this binary reads the Keychain item. See [docs/touch-id.md](docs/touch-id.md) for details and limitations.
+
+## End-to-End Testing
+
+Run the deterministic mock E2E tests:
+
+```sh
+CARGO_HOME=$PWD/.cargo-home cargo test --test e2e_mock
+```
+
+Run the full local verification suite:
+
+```sh
+CARGO_HOME=$PWD/.cargo-home cargo fmt --check
+CARGO_HOME=$PWD/.cargo-home cargo check --all-targets
+CARGO_HOME=$PWD/.cargo-home cargo clippy --all-targets -- -D warnings
+CARGO_HOME=$PWD/.cargo-home cargo test
+```
+
+See [docs/testing.md](docs/testing.md) for test strategy and adding new flows.
+
+## Documentation
+
+- [docs/getting-started.md](docs/getting-started.md): first run and common commands.
+- [docs/configuration.md](docs/configuration.md): `~/.okta-aws` and AWS credential file behavior.
+- [docs/auth-flow.md](docs/auth-flow.md): Okta, SAML, MFA, and AWS STS flow.
+- [docs/touch-id.md](docs/touch-id.md): macOS Keychain and Touch ID support.
+- [docs/testing.md](docs/testing.md): unit, integration, and mock E2E tests.
+- [docs/development.md](docs/development.md): crate layout and maintenance notes.
+- [docs/troubleshooting.md](docs/troubleshooting.md): common failures and fixes.
+
+## Status
+
+This repository is a Rust port of the Python behavior. It uses direct Okta Authn HTTP calls because the current Rust `okta` crate targets Okta Management API use cases and does not cover this Classic Authn plus AWS SAML flow.

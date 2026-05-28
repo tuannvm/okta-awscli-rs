@@ -60,6 +60,12 @@ pub struct Args {
     )]
     browser: bool,
     #[arg(
+        long = "browser-timeout",
+        default_value_t = 180,
+        help = "Seconds to wait for --browser SAML capture"
+    )]
+    browser_timeout: u64,
+    #[arg(
         long = "webauthn-keychain",
         help = "Experimental: answer Okta WebAuthn factors with a macOS Keychain-backed virtual authenticator"
     )]
@@ -157,6 +163,7 @@ pub async fn run() -> Result<()> {
             refresh_role: args.refresh_role,
             browser_paste: args.browser_paste,
             browser: args.browser,
+            browser_timeout: Duration::from_secs(args.browser_timeout),
             webauthn_keychain: args.webauthn_keychain,
         };
         get_credentials(&mut config, &aws_auth, &provider, request).await?;
@@ -179,6 +186,7 @@ struct CredentialRequest<'a> {
     refresh_role: bool,
     browser_paste: bool,
     browser: bool,
+    browser_timeout: Duration,
     webauthn_keychain: bool,
 }
 
@@ -189,7 +197,7 @@ async fn get_credentials<P: StsProvider + Sync>(
     request: CredentialRequest<'_>,
 ) -> Result<()> {
     let assertion = if request.browser {
-        browser_assertion(config, request.okta_profile).await?
+        browser_assertion(config, request.okta_profile, request.browser_timeout).await?
     } else if request.browser_paste {
         browser_paste_assertion(config, request.okta_profile)?
     } else {
@@ -235,7 +243,11 @@ async fn get_credentials<P: StsProvider + Sync>(
     Ok(())
 }
 
-async fn browser_assertion(config: &OktaConfig, okta_profile: &str) -> Result<String> {
+async fn browser_assertion(
+    config: &OktaConfig,
+    okta_profile: &str,
+    timeout: Duration,
+) -> Result<String> {
     let app_link = config.app_link_for(okta_profile)?.ok_or_else(|| {
         anyhow!(
             "--browser requires app-link in ~/.okta-aws. Run the normal flow once to discover it, or set app-link manually."
@@ -244,21 +256,36 @@ async fn browser_assertion(config: &OktaConfig, okta_profile: &str) -> Result<St
     let chrome = chrome_path()?;
     let profile_dir = browser_profile_dir()?;
     create_private_dir(&profile_dir)?;
-    let mut child = Command::new(&chrome)
+    let child = Command::new(&chrome)
         .arg("--remote-debugging-port=0")
+        .arg("--remote-debugging-address=127.0.0.1")
         .arg(format!("--user-data-dir={}", profile_dir.display()))
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
+        .arg("--disable-background-networking")
+        .arg("--disable-sync")
+        .arg("--disable-component-update")
+        .arg("--window-size=1200,900")
         .arg("--new-window")
         .arg("about:blank")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .with_context(|| format!("starting Chrome at {}", chrome.display()))?;
-    let result = capture_saml_with_chrome(&profile_dir, &app_link).await;
-    shutdown_browser(&mut child);
-    let _ = fs::remove_dir_all(&profile_dir);
-    result
+    let session = BrowserSession { child, profile_dir };
+    capture_saml_with_chrome(&session.profile_dir, &app_link, timeout).await
+}
+
+struct BrowserSession {
+    child: Child,
+    profile_dir: PathBuf,
+}
+
+impl Drop for BrowserSession {
+    fn drop(&mut self) {
+        shutdown_browser(&mut self.child);
+        let _ = fs::remove_dir_all(&self.profile_dir);
+    }
 }
 
 fn create_private_dir(path: &Path) -> Result<()> {
@@ -330,12 +357,17 @@ fn browser_profile_dir() -> Result<PathBuf> {
     )))
 }
 
-async fn capture_saml_with_chrome(profile_dir: &Path, app_link: &str) -> Result<String> {
+async fn capture_saml_with_chrome(
+    profile_dir: &Path,
+    app_link: &str,
+    timeout: Duration,
+) -> Result<String> {
     let port = wait_for_devtools_port(profile_dir).await?;
     let client = reqwest::Client::new();
     let page_ws = wait_for_page_websocket(&client, port).await?;
     let (mut socket, _) =
         tungstenite::connect(&page_ws).context("connecting to Chrome DevTools")?;
+    set_cdp_read_timeout(&mut socket)?;
     cdp_send(&mut socket, 1, "Page.enable", serde_json::json!({}))?;
     cdp_send(
         &mut socket,
@@ -349,30 +381,60 @@ async fn capture_saml_with_chrome(profile_dir: &Path, app_link: &str) -> Result<
         "Page.navigate",
         serde_json::json!({ "url": app_link }),
     )?;
-    eprintln!("Opened isolated Chrome session. Complete FastPass in that browser window.");
-    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    eprintln!("Opened isolated browser session for Okta.");
+    eprintln!("Complete FastPass or your browser authenticator in that window.");
+    eprintln!("The session profile is temporary and will be removed when capture finishes.");
+    let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
-        let msg = socket.read().context("reading Chrome DevTools event")?;
+        let msg = match socket.read() {
+            Ok(msg) => msg,
+            Err(tungstenite::Error::Io(err))
+                if err.kind() == std::io::ErrorKind::WouldBlock
+                    || err.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(err) => return Err(err).context("reading Chrome DevTools event"),
+        };
         let tungstenite::Message::Text(text) = msg else {
             continue;
         };
         let value: serde_json::Value = serde_json::from_str(&text)?;
-        if value["method"].as_str() != Some("Network.requestWillBeSent") {
-            continue;
-        }
-        let request = &value["params"]["request"];
-        let url = request["url"].as_str().unwrap_or_default();
-        let method = request["method"].as_str().unwrap_or_default();
-        if method == "POST"
-            && (url.contains("signin.aws.amazon.com/saml") || url.contains("amazon.com/saml"))
-            && let Some(post_data) = request["postData"].as_str()
-            && let Ok(assertion) = parse_pasted_saml_response(post_data)
-        {
-            eprintln!("Captured SAMLResponse from browser.");
-            return Ok(assertion);
+        match value["method"].as_str() {
+            Some("Network.requestWillBeSent") => {
+                let request = &value["params"]["request"];
+                let url = request["url"].as_str().unwrap_or_default();
+                let method = request["method"].as_str().unwrap_or_default();
+                if method == "POST"
+                    && is_aws_saml_url(url)
+                    && let Some(post_data) = request["postData"].as_str()
+                    && let Ok(assertion) = parse_pasted_saml_response(post_data)
+                {
+                    eprintln!("Captured SAMLResponse from browser.");
+                    return Ok(assertion);
+                }
+            }
+            Some("Inspector.detached") => bail!("browser capture session was closed"),
+            _ => {}
         }
     }
-    bail!("timed out waiting for browser SAMLResponse")
+    bail!(
+        "timed out after {} seconds waiting for browser SAMLResponse",
+        timeout.as_secs()
+    )
+}
+
+fn is_aws_saml_url(url: &str) -> bool {
+    url.contains("signin.aws.amazon.com/saml") || url.contains("amazon.com/saml")
+}
+
+fn set_cdp_read_timeout(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+) -> Result<()> {
+    if let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_mut() {
+        stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+    }
+    Ok(())
 }
 
 async fn wait_for_devtools_port(profile_dir: &Path) -> Result<u16> {
@@ -553,5 +615,12 @@ mod tests {
             parse_pasted_saml_response("RelayState=x&SAMLResponse=abc%2B123%3D").unwrap(),
             "abc+123=".to_string()
         );
+    }
+
+    #[test]
+    fn identifies_aws_saml_capture_urls() {
+        assert!(is_aws_saml_url("https://signin.aws.amazon.com/saml"));
+        assert!(is_aws_saml_url("https://example.amazon.com/saml"));
+        assert!(!is_aws_saml_url("https://example.okta.com/app"));
     }
 }

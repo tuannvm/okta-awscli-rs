@@ -87,6 +87,12 @@ okta-awscli-rs --okta-profile default --profile prod-admin --force --browser
 
 The profile must have an `app-link`. The CLI launches an isolated Chrome/Chromium-family browser session, opens that link, watches for the AWS SAML POST, captures `SAMLResponse`, and then assumes the AWS role normally.
 
+The browser session uses a temporary profile and closes it after capture. Increase the capture timeout when the login path needs more time:
+
+```sh
+okta-awscli-rs --okta-profile default --profile prod-admin --force --browser --browser-timeout 300
+```
+
 Manual paste mode remains available when automatic capture is not possible:
 
 ```sh

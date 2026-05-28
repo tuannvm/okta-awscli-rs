@@ -105,6 +105,12 @@ okta-awscli-rs --okta-profile default --profile my-aws-profile --browser
 
 The CLI launches an isolated Chrome/Chromium-family browser session, opens the configured Okta AWS app link, lets you authenticate with FastPass, captures the AWS SAML POST, and then assumes the AWS role.
 
+Use a longer wait when your sign-in flow needs more time:
+
+```sh
+okta-awscli-rs --okta-profile default --profile my-aws-profile --browser --browser-timeout 300
+```
+
 `--touch-id` is different: it only unlocks the local Keychain password used by the terminal Authn flow.
 
 If automatic capture is not available, use manual paste mode:

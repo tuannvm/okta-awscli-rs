@@ -4,6 +4,8 @@ The implementation follows the Python tool's Classic Okta Authn plus AWS SAML de
 
 `--browser` is a separate browser-assisted path for environments where FastPass is only available in the browser. In that mode, the CLI launches an isolated Chrome/Chromium-family browser session, opens the configured Okta AWS app link, captures the AWS SAML POST through DevTools, and then resumes at AWS STS role exchange.
 
+The DevTools listener is bound to `127.0.0.1`, uses a random port chosen by Chrome, and runs against a temporary browser profile that is deleted after capture. The CLI only extracts the outbound AWS `SAMLResponse` form body; it does not read browser passwords or persist browser profile data.
+
 `--browser-paste` is the manual fallback. It opens the configured app link and accepts a pasted `SAMLResponse`.
 
 ## High-Level Flow

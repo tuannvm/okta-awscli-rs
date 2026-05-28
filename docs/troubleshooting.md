@@ -81,6 +81,7 @@ If capture times out:
 - Confirm Chrome, Chromium, Brave, or Edge is installed.
 - Confirm the profile has an `app-link` value in `~/.okta-aws`.
 - Complete the AWS SAML app launch in the isolated browser window, not a normal browser window.
+- Use `--browser-timeout 300` if the login path takes longer than the default 180 seconds.
 - Use `--browser-paste` as a manual fallback.
 
 ## WebAuthn Keychain Has No Credential

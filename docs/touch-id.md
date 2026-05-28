@@ -53,6 +53,18 @@ Use it only when the Okta WebAuthn credential was enrolled through that compatib
 
 If Okta returns a non-32-byte credential id, the credential is not compatible with this experimental path.
 
+### Enroll A Compatible Credential
+
+When Okta offers WebAuthn enrollment through the Classic Authn API, this helper can generate the WebAuthn credential locally and activate it with Okta:
+
+```sh
+okta-awscli-rs --okta-profile default --username user@example.com --webauthn-keychain-enroll
+```
+
+The helper creates a P-256 ES256 signing key, builds a WebAuthn packed attestation response, sends the activation response to Okta, and stores the encrypted private key in macOS Keychain only after Okta accepts the enrollment. The Keychain service is `<okta-domain>-webauthn`; the account is the generated credential's user UUID in lowercase hex.
+
+This does not enroll or import your existing browser/iCloud Keychain passkey. If Okta requires MFA before adding a new factor, or if your org only exposes Security Methods enrollment in the browser, use the browser enrollment UI or `--browser` for AWS SAML authentication.
+
 ## Limitations
 
 The current implementation is an application-level Touch ID gate before this binary reads the Keychain item. The Keychain item itself is not created with a per-item biometric access-control policy.
@@ -62,6 +74,7 @@ Practical impact:
 - `okta-awscli-rs --touch-id` requires Touch ID before it reads the password.
 - `okta-awscli-rs --browser` uses the browser for Okta FastPass/fingerprint authentication and then writes AWS credentials.
 - `okta-awscli-rs --webauthn-keychain` tries a Keychain-backed WebAuthn assertion for compatible CLI-enrolled credentials.
+- `okta-awscli-rs --webauthn-keychain-enroll` creates one of those compatible credentials only when Okta exposes Classic Authn WebAuthn enrollment.
 - Built-in macOS Touch ID/passkeys for Okta require a browser-associated flow, not a bare terminal process.
 - Other processes with permission to read the same Keychain item are governed by normal Keychain access controls, not this tool's Touch ID check.
 

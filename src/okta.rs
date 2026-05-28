@@ -122,6 +122,101 @@ impl OktaAuth {
         Ok((app_name, self.get_saml_assertion(&html, &session_id).await?))
     }
 
+    pub async fn enroll_webauthn_keychain(&self) -> Result<()> {
+        let resp = self
+            .client
+            .post(&self.auth_url)
+            .json(&json!({
+                "username": self.username,
+                "password": self.password,
+            }))
+            .send()
+            .await?;
+        let status = resp.status();
+        let flow: Value = resp.json().await?;
+        match flow["status"].as_str() {
+            Some("MFA_ENROLL") => {}
+            Some("MFA_REQUIRED") => bail!(
+                "Okta requires MFA before new factor enrollment for this account. Enroll the Keychain-backed WebAuthn factor from an Okta browser session or ask an administrator to allow enrollment during authentication."
+            ),
+            Some("SUCCESS") => bail!(
+                "Okta signed in without offering factor enrollment. Use the Okta Security Methods page to add another WebAuthn authenticator, or ask an administrator to require/allow WebAuthn enrollment."
+            ),
+            Some(other) => bail!("Unsupported Okta enrollment status: {other}"),
+            None if !status.is_success() => bail!(
+                "{}",
+                flow["errorSummary"]
+                    .as_str()
+                    .unwrap_or("Okta authentication failed")
+            ),
+            None => bail!("Okta authentication failed: missing status"),
+        }
+
+        let state_token = flow["stateToken"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Okta MFA_ENROLL response did not include stateToken"))?;
+        let factor = flow["_embedded"]["factors"]
+            .as_array()
+            .and_then(|factors| {
+                factors
+                    .iter()
+                    .find(|factor| factor["factorType"].as_str() == Some("webauthn"))
+            })
+            .ok_or_else(|| anyhow!("Okta did not offer a WebAuthn enrollment factor"))?;
+        let enroll = factor["_links"]["enroll"]["href"]
+            .as_str()
+            .ok_or_else(|| anyhow!("WebAuthn enrollment factor missing enroll link"))?;
+
+        let activation: Value = self
+            .client
+            .post(enroll)
+            .json(&json!({ "stateToken": state_token }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        let creation = webauthn_creation_options(&activation, &self.base_url, &self.username)?;
+        let created = crate::webauthn_keychain::create_credential(&creation)?;
+        let next = activation["_links"]["next"]["href"]
+            .as_str()
+            .or_else(|| activation["_links"]["activate"]["href"].as_str())
+            .ok_or_else(|| anyhow!("WebAuthn enrollment activation missing next link"))?;
+        let activation_state = activation["stateToken"].as_str().unwrap_or(state_token);
+        let mut req = json!({ "stateToken": activation_state });
+        if let Some(map) = req.as_object_mut()
+            && let Some(response_map) = created.response.as_object()
+        {
+            for (key, value) in response_map {
+                map.insert(key.clone(), value.clone());
+            }
+        }
+        let completed: Value = self
+            .client
+            .post(next)
+            .json(&req)
+            .send()
+            .await?
+            .json()
+            .await?;
+        match completed["status"].as_str() {
+            Some("SUCCESS") | Some("MFA_ENROLL") | Some("MFA_REQUIRED") => {
+                crate::webauthn_keychain::store_credential(created.pending)?;
+                println!(
+                    "Stored WebAuthn Keychain credential for relying party {}. Credential id: {}",
+                    creation.relying_party_id, created.credential_id
+                );
+                Ok(())
+            }
+            Some(other) => bail!("Okta WebAuthn enrollment failed with status {other}"),
+            None => bail!(
+                "{}",
+                completed["errorSummary"]
+                    .as_str()
+                    .unwrap_or("Okta WebAuthn enrollment failed")
+            ),
+        }
+    }
+
     async fn primary_auth(&self) -> Result<String> {
         let resp = self
             .client
@@ -693,6 +788,41 @@ fn webauthn_challenge(
     })
 }
 
+fn webauthn_creation_options(
+    response: &Value,
+    origin: &str,
+    fallback_user: &str,
+) -> Result<crate::webauthn_keychain::WebAuthnCreationOptions> {
+    let challenge = response["_embedded"]["factor"]["_embedded"]["activation"]["challenge"]
+        .as_str()
+        .or_else(|| response["_embedded"]["factor"]["_embedded"]["challenge"]["challenge"].as_str())
+        .or_else(|| response["_embedded"]["challenge"]["challenge"].as_str())
+        .ok_or_else(|| anyhow!("WebAuthn enrollment activation missing challenge value"))?;
+    let user = &response["_embedded"]["user"];
+    let profile = &user["profile"];
+    let user_id = user["id"]
+        .as_str()
+        .or_else(|| profile["login"].as_str())
+        .unwrap_or(fallback_user);
+    let user_name = profile["login"].as_str().unwrap_or(fallback_user);
+    let display_name = match (profile["firstName"].as_str(), profile["lastName"].as_str()) {
+        (Some(first), Some(last)) => format!("{first} {last}"),
+        _ => user_name.to_string(),
+    };
+    let relying_party_id = url::Url::parse(origin)?
+        .host_str()
+        .ok_or_else(|| anyhow!("Okta origin missing host"))?
+        .to_string();
+    Ok(crate::webauthn_keychain::WebAuthnCreationOptions {
+        origin: origin.to_string(),
+        relying_party_id,
+        user_id: user_id.to_string(),
+        user_name: user_name.to_string(),
+        user_display_name: display_name,
+        challenge: challenge.to_string(),
+    })
+}
+
 fn pass_code(totp_token: Option<&str>) -> Result<String> {
     Ok(match totp_token {
         Some(token) => token.to_string(),
@@ -761,5 +891,36 @@ mod tests {
             build_base_factor_name(&factor),
             "Okta Verify - TOTP (user@example.com)"
         );
+    }
+
+    #[test]
+    fn parses_webauthn_creation_options() {
+        let response = json!({
+            "stateToken": "state-2",
+            "_embedded": {
+                "user": {
+                    "id": "user-id",
+                    "profile": {
+                        "login": "user@example.com",
+                        "firstName": "User",
+                        "lastName": "Example"
+                    }
+                },
+                "factor": {
+                    "_embedded": {
+                        "activation": {
+                            "challenge": "challenge-value"
+                        }
+                    }
+                }
+            }
+        });
+        let options =
+            webauthn_creation_options(&response, "https://example.okta.com", "fallback").unwrap();
+        assert_eq!(options.relying_party_id, "example.okta.com");
+        assert_eq!(options.user_id, "user-id");
+        assert_eq!(options.user_name, "user@example.com");
+        assert_eq!(options.user_display_name, "User Example");
+        assert_eq!(options.challenge, "challenge-value");
     }
 }

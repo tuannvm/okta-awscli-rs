@@ -101,6 +101,14 @@ If your Okta tenant exposes a Classic Authn WebAuthn factor and the credential w
 okta-awscli-rs --okta-profile default --profile prod-admin --force --webauthn-keychain
 ```
 
+To enroll a compatible credential through Okta Classic Authn when your org offers WebAuthn enrollment during sign-in:
+
+```sh
+okta-awscli-rs --okta-profile default --username user@example.com --webauthn-keychain-enroll
+```
+
+If Okta requires MFA before enrollment or sends you to the browser Security Methods page, this helper cannot bypass that policy.
+
 For normal browser or iCloud Keychain passkeys, use `--browser` instead.
 
 ## Use Multiple Okta Profiles

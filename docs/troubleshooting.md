@@ -91,6 +91,12 @@ Use `--browser` when your fingerprint authenticator was registered in a normal b
 
 If the command says Okta returned a non-32-byte credential id, that credential was not enrolled through the compatible virtual-authenticator model. That is expected for normal browser-managed Okta WebAuthn credentials.
 
+## WebAuthn Keychain Enrollment Is Not Offered
+
+`--webauthn-keychain-enroll` can only run when Okta Classic Authn returns `MFA_ENROLL` and includes a WebAuthn enrollment factor. If Okta returns `MFA_REQUIRED`, your org requires an existing factor before adding another one. If Okta returns `SUCCESS`, sign-in completed without an enrollment step.
+
+Use Okta's browser Security Methods page for those cases, or use `--browser` for AWS SAML authentication with your normal FastPass/passkey.
+
 ## Cargo Cache Permission Errors
 
 Use a repo-local Cargo cache:

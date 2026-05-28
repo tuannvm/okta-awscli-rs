@@ -64,6 +64,11 @@ pub struct Args {
         help = "Experimental: answer Okta WebAuthn factors with a macOS Keychain-backed virtual authenticator"
     )]
     webauthn_keychain: bool,
+    #[arg(
+        long = "webauthn-keychain-enroll",
+        help = "Experimental: enroll an Okta WebAuthn factor backed by a generated macOS Keychain credential"
+    )]
+    webauthn_keychain_enroll: bool,
     #[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
     awscli_args: Vec<String>,
 }
@@ -85,8 +90,11 @@ pub async fn run() -> Result<()> {
     if args.browser_paste && args.browser {
         bail!("Use only one of --browser-paste or --browser");
     }
+    if args.webauthn_keychain_enroll && (args.browser || args.browser_paste) {
+        bail!("Use --webauthn-keychain-enroll without --browser or --browser-paste");
+    }
     let browser_mode = args.browser_paste || args.browser;
-    let username = if browser_mode {
+    let username = if browser_mode && !args.webauthn_keychain_enroll {
         None
     } else {
         Some(
@@ -113,6 +121,19 @@ pub async fn run() -> Result<()> {
         eprintln!(
             "Note: --touch-id only unlocks the local Keychain password. Use --browser for browser-based Okta FastPass."
         );
+    }
+
+    if args.webauthn_keychain_enroll {
+        let okta = OktaAuth::new(
+            &config,
+            &okta_profile,
+            username.ok_or_else(|| anyhow!("username missing for WebAuthn enrollment"))?,
+            password.ok_or_else(|| anyhow!("password missing for WebAuthn enrollment"))?,
+            args.token.clone(),
+            false,
+        )?;
+        okta.enroll_webauthn_keychain().await?;
+        return Ok(());
     }
 
     let aws_auth = AwsAuth::new(

@@ -121,7 +121,13 @@ For Okta tenants that expose a Classic Authn `webauthn` factor, the CLI can try 
 okta-awscli-rs --okta-profile default --profile my-aws-profile --webauthn-keychain
 ```
 
-This is experimental and only works with credentials stored in the `ctap-keyring-device` compatible Keychain format. It does not use browser/iCloud passkeys or replace `--browser` for FastPass.
+Enroll a compatible credential when Okta offers WebAuthn enrollment during Classic Authn:
+
+```sh
+okta-awscli-rs --okta-profile default --username user@example.com --webauthn-keychain-enroll
+```
+
+This is experimental. The enrollment helper generates a new ES256 credential, completes Okta's WebAuthn make-credential activation, and stores the encrypted private key as a generic macOS Keychain item under the Okta relying party. It does not import browser/iCloud passkeys, and many Okta orgs require factor enrollment from the browser Security Methods page instead of the Classic Authn API. Use `--browser` for normal FastPass.
 
 ## End-to-End Testing
 

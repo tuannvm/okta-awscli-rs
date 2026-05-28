@@ -694,9 +694,13 @@ fn build_app_factor_name(factor: &Value) -> String {
 }
 
 async fn launch_fastpass_challenge(client: &Client, response: &Value) -> Result<bool> {
+    log::debug!(
+        "FastPass challenge response shape: {}",
+        redacted_json(response)
+    );
     let challenge = find_device_challenge(response).ok_or_else(|| {
         anyhow!(
-            "Okta FastPass was selected, but Okta did not return a launchable device challenge. Run again with --debug and file the redacted MFA_CHALLENGE shape."
+            "Okta FastPass was selected, but Okta did not return a launchable device challenge. Run again with --debug and share the redacted FastPass challenge response shape."
         )
     })?;
     let method = challenge["challengeMethod"]
@@ -808,6 +812,67 @@ fn open_url(href: &str) -> Result<()> {
     } else {
         bail!("failed to open Okta Verify challenge URL")
     }
+}
+
+fn redacted_json(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (key, value) in map {
+                let redacted = if is_sensitive_json_key(key) {
+                    Value::String("<redacted>".to_string())
+                } else if should_keep_json_string(key) {
+                    match value {
+                        Value::String(s) => Value::String(s.clone()),
+                        _ => redacted_json(value),
+                    }
+                } else {
+                    redacted_json(value)
+                };
+                out.insert(key.clone(), redacted);
+            }
+            Value::Object(out)
+        }
+        Value::Array(values) => Value::Array(values.iter().map(redacted_json).collect()),
+        Value::String(_) => Value::String("<string>".to_string()),
+        Value::Number(_) => Value::String("<number>".to_string()),
+        Value::Bool(_) => Value::String("<bool>".to_string()),
+        Value::Null => Value::Null,
+    }
+}
+
+fn is_sensitive_json_key(key: &str) -> bool {
+    matches!(
+        key,
+        "stateToken"
+            | "sessionToken"
+            | "challengeRequest"
+            | "href"
+            | "next"
+            | "verify"
+            | "poll"
+            | "cancel"
+            | "passCode"
+            | "password"
+            | "nonce"
+            | "credentialId"
+            | "correctAnswer"
+    )
+}
+
+fn should_keep_json_string(key: &str) -> bool {
+    matches!(
+        key,
+        "status"
+            | "factorResult"
+            | "factorType"
+            | "provider"
+            | "challengeMethod"
+            | "name"
+            | "rel"
+            | "type"
+            | "errorCode"
+    )
 }
 
 fn pass_code(totp_token: Option<&str>) -> Result<String> {
@@ -940,5 +1005,41 @@ mod tests {
         });
         let challenge = find_device_challenge(&response).unwrap();
         assert_eq!(challenge["challengeMethod"].as_str(), Some("APP_LINK"));
+    }
+
+    #[test]
+    fn redacts_fastpass_response_diagnostics() {
+        let response = json!({
+            "status": "MFA_CHALLENGE",
+            "stateToken": "secret-state",
+            "_embedded": {
+                "factor": {
+                    "factorType": "signed_nonce",
+                    "_embedded": {
+                        "challenge": {
+                            "challengeMethod": "APP_LINK",
+                            "href": "okta-verify://secret",
+                            "challengeRequest": "secret-jwt",
+                            "ports": [8769]
+                        }
+                    }
+                }
+            }
+        });
+        let redacted = redacted_json(&response);
+        assert_eq!(redacted["status"].as_str(), Some("MFA_CHALLENGE"));
+        assert_eq!(redacted["stateToken"].as_str(), Some("<redacted>"));
+        assert_eq!(
+            redacted["_embedded"]["factor"]["factorType"].as_str(),
+            Some("signed_nonce")
+        );
+        assert_eq!(
+            redacted["_embedded"]["factor"]["_embedded"]["challenge"]["challengeMethod"].as_str(),
+            Some("APP_LINK")
+        );
+        assert_eq!(
+            redacted["_embedded"]["factor"]["_embedded"]["challenge"]["href"].as_str(),
+            Some("<redacted>")
+        );
     }
 }

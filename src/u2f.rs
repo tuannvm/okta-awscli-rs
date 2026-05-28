@@ -8,6 +8,8 @@ use authenticator::statecallback::StateCallback;
 use base64::Engine;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -81,6 +83,12 @@ pub fn authenticate(challenge: &U2fChallenge) -> Result<serde_json::Value> {
 }
 
 pub fn authenticate_webauthn(challenge: &WebAuthnChallenge) -> Result<serde_json::Value> {
+    #[cfg(target_os = "macos")]
+    match authenticate_webauthn_macos(challenge) {
+        Ok(value) => return Ok(value),
+        Err(err) => log::debug!("macOS platform WebAuthn failed: {err:#}"),
+    }
+
     let client_data = json!({
         "type": "webauthn.get",
         "challenge": challenge.challenge,
@@ -137,6 +145,162 @@ pub fn authenticate_webauthn(challenge: &WebAuthnChallenge) -> Result<serde_json
         "signatureData": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(result.assertion.signature),
         "credentialId": challenge.credential_id,
     }))
+}
+
+#[cfg(target_os = "macos")]
+fn authenticate_webauthn_macos(challenge: &WebAuthnChallenge) -> Result<serde_json::Value> {
+    let script = r#"
+import AppKit
+import AuthenticationServices
+import Foundation
+
+func decodeBase64Url(_ input: String) -> Data? {
+    var value = input.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+    let padding = (4 - value.count % 4) % 4
+    if padding > 0 {
+        value += String(repeating: "=", count: padding)
+    }
+    return Data(base64Encoded: value)
+}
+
+func encodeBase64Url(_ data: Data) -> String {
+    return data.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+}
+
+final class AuthorizationDelegate: NSObject, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
+    let window: NSWindow
+    var output: String?
+    var completed = false
+
+    init(window: NSWindow) {
+        self.window = window
+    }
+
+    func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
+        return window
+    }
+
+    func authorizationController(controller: ASAuthorizationController, didCompleteWithAuthorization authorization: ASAuthorization) {
+        guard let assertion = authorization.credential as? ASAuthorizationPlatformPublicKeyCredentialAssertion else {
+            output = "{\"error\":\"unexpected credential type\"}"
+            completed = true
+            return
+        }
+        let payload: [String: String] = [
+            "clientData": encodeBase64Url(assertion.rawClientDataJSON),
+            "authenticatorData": encodeBase64Url(assertion.rawAuthenticatorData),
+            "signatureData": encodeBase64Url(assertion.signature),
+            "credentialId": encodeBase64Url(assertion.credentialID)
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+           let json = String(data: data, encoding: .utf8) {
+            output = json
+        } else {
+            output = "{\"error\":\"failed to serialize assertion\"}"
+        }
+        completed = true
+    }
+
+    func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
+        output = "{\"error\":\"\(error.localizedDescription.replacingOccurrences(of: "\"\\\"", with: "\\\\\\\\"").replacingOccurrences(of: "\"\n\"", with: "\" \""))\"}"
+        completed = true
+    }
+}
+
+if CommandLine.arguments.count != 6 {
+    fputs("{\"error\":\"usage: rp_id origin challenge credential_id user_verification\"}\n", stderr)
+    exit(2)
+}
+
+let rpId = CommandLine.arguments[1]
+let challengeB64 = CommandLine.arguments[3]
+let credentialB64 = CommandLine.arguments[4]
+let userVerification = CommandLine.arguments[5]
+
+guard let challenge = decodeBase64Url(challengeB64), let credentialID = decodeBase64Url(credentialB64) else {
+    fputs("{\"error\":\"invalid base64url challenge or credential\"}\n", stderr)
+    exit(2)
+}
+
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
+let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1, height: 1), styleMask: [], backing: .buffered, defer: false)
+let delegate = AuthorizationDelegate(window: window)
+let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: rpId)
+let request = provider.createCredentialAssertionRequest(challenge: challenge)
+request.allowedCredentials = [ASAuthorizationPlatformPublicKeyCredentialDescriptor(credentialID: credentialID)]
+switch userVerification.lowercased() {
+case "required":
+    request.userVerificationPreference = .required
+case "discouraged":
+    request.userVerificationPreference = .discouraged
+default:
+    request.userVerificationPreference = .preferred
+}
+
+let controller = ASAuthorizationController(authorizationRequests: [request])
+controller.delegate = delegate
+controller.presentationContextProvider = delegate
+controller.performRequests()
+
+let deadline = Date().addingTimeInterval(65)
+while !delegate.completed && Date() < deadline {
+    RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+}
+
+if !delegate.completed {
+    fputs("{\"error\":\"timed out waiting for macOS WebAuthn prompt\"}\n", stderr)
+    exit(1)
+}
+
+if let output = delegate.output {
+    print(output)
+    if output.contains("\"error\"") {
+        exit(1)
+    }
+    exit(0)
+}
+fputs("{\"error\":\"no assertion returned\"}\n", stderr)
+exit(1)
+"#;
+
+    let mut child = Command::new("/usr/bin/swift")
+        .arg("-")
+        .arg(&challenge.relying_party_id)
+        .arg(&challenge.origin)
+        .arg(&challenge.challenge)
+        .arg(&challenge.credential_id)
+        .arg(&challenge.user_verification)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("starting macOS WebAuthn helper")?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| anyhow!("macOS WebAuthn helper stdin unavailable"))?
+        .write_all(script.as_bytes())?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!(
+            "macOS WebAuthn helper failed: {}{}",
+            stderr.trim(),
+            stdout.trim()
+        );
+    }
+    let stdout = String::from_utf8(output.stdout).context("decoding macOS WebAuthn output")?;
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).context("parsing macOS WebAuthn output")?;
+    if let Some(error) = value["error"].as_str() {
+        bail!("macOS WebAuthn helper failed: {error}");
+    }
+    Ok(value)
 }
 
 fn decode_b64(input: &str) -> Result<Vec<u8>> {

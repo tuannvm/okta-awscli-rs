@@ -72,13 +72,16 @@ Check that the security key is connected and available to the OS. The tool waits
 
 For Okta tenants that offer multiple factors, using `factor = OKTA` with Okta Verify push is often easier for terminal workflows.
 
-## `--okta-fastpass` Lists Classic Factors
+## Browser FastPass Capture Times Out
 
-Okta FastPass uses Okta Verify device challenge factors such as `signed_nonce` or WebAuthn. If Okta returns only Classic Authn factors, the tool fails instead of asking for a verification code.
+Use `--browser-capture` when FastPass or a platform fingerprint authenticator is required. The terminal Authn flow supports Classic factors such as Okta Verify push, TOTP, and U2F; it does not directly complete browser-bound FastPass challenges.
 
-Use `factor = OKTA_PUSH` when you want an Okta Verify push from the Classic Authn flow. Use `--okta-fastpass` only when you specifically want the CLI to require a FastPass-capable factor.
+If capture times out:
 
-If the Okta web UI shows a security key or biometric authenticator but this CLI lists only TOTP factors, the authenticator is not being exposed through the Classic Authn response used by the AWS SAML flow. That web-registered authenticator generally requires Okta's browser/IDX device challenge path.
+- Confirm Chrome, Chromium, Brave, or Edge is installed.
+- Confirm the profile has an `app-link` value in `~/.okta-aws`.
+- Complete the AWS SAML app launch in the isolated browser window, not a normal browser window.
+- Use `--browser-paste` as a manual fallback.
 
 ## Cargo Cache Permission Errors
 

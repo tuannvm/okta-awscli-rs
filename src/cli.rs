@@ -50,11 +50,6 @@ pub struct Args {
     store_touch_id: bool,
     #[arg(
         long,
-        help = "Require Okta FastPass / signed-nonce MFA when Okta exposes it"
-    )]
-    okta_fastpass: bool,
-    #[arg(
-        long,
         help = "Open the configured Okta AWS app in a browser and prompt for a pasted SAMLResponse"
     )]
     browser_paste: bool,
@@ -108,9 +103,9 @@ pub async fn run() -> Result<()> {
     } else {
         None
     };
-    if args.touch_id && !args.okta_fastpass && !browser_mode {
+    if args.touch_id && !browser_mode {
         eprintln!(
-            "Note: --touch-id only unlocks the local Keychain password. Use --okta-fastpass to require an Okta FastPass factor."
+            "Note: --touch-id only unlocks the local Keychain password. Use --browser-capture for browser-based Okta FastPass."
         );
     }
 
@@ -133,7 +128,6 @@ pub async fn run() -> Result<()> {
             token: args.token.clone(),
             cache: args.cache,
             refresh_role: args.refresh_role,
-            okta_fastpass: args.okta_fastpass,
             browser_paste: args.browser_paste,
             browser_capture: args.browser_capture,
         };
@@ -155,7 +149,6 @@ struct CredentialRequest<'a> {
     token: Option<String>,
     cache: bool,
     refresh_role: bool,
-    okta_fastpass: bool,
     browser_paste: bool,
     browser_capture: bool,
 }
@@ -181,7 +174,6 @@ async fn get_credentials<P: StsProvider + Sync>(
                 .password
                 .ok_or_else(|| anyhow!("password missing for Okta authentication"))?,
             request.token,
-            request.okta_fastpass,
         )?;
         okta.get_assertion(config).await?.1
     };

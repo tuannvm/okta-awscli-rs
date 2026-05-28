@@ -14,6 +14,7 @@ It is a Rust reimplementation of the Python `okta-awscli` workflow with the same
 - Writes temporary credentials to `~/.aws/credentials` or `AWS_SHARED_CREDENTIALS_FILE`.
 - Runs `aws --profile <profile> ...` when AWS CLI arguments are provided.
 - Can store the Okta password in macOS Keychain and require Touch ID before reading it.
+- Supports browser-assisted FastPass/fingerprint authentication with an isolated Chrome/Chromium-family session.
 
 ## Install
 
@@ -74,7 +75,7 @@ Common optional fields:
 - `password`: Okta password. Avoid storing this in plaintext when possible.
 - `app-link`: Okta AWS app link. If omitted, the tool discovers AWS apps from Okta.
 - `role`: AWS role ARN. If omitted, the tool prompts you to choose a role.
-- `factor`: preferred MFA provider. Supported values include `OKTA`, `OKTA_PUSH`, `OKTA_TOTP`, `GOOGLE`, `U2F`, and `OKTA_FASTPASS`.
+- `factor`: preferred MFA provider. Supported values include `OKTA`, `OKTA_PUSH`, `OKTA_TOTP`, `GOOGLE`, and `U2F`.
 
 See [docs/configuration.md](docs/configuration.md) for the full config reference.
 
@@ -94,27 +95,17 @@ okta-awscli-rs --touch-id --username user@example.com --profile my-aws-profile
 
 Touch ID is an application-level gate before this binary reads the Keychain item. See [docs/touch-id.md](docs/touch-id.md) for details and limitations.
 
-## Okta FastPass
-
-Okta FastPass is different from local macOS Touch ID. `--touch-id` unlocks the password stored by this CLI; FastPass is an Okta Verify device-challenge flow controlled by Okta.
-
-To require FastPass when Okta exposes a signed-nonce or WebAuthn factor:
-
-```sh
-okta-awscli-rs --okta-fastpass --username user@example.com --profile my-aws-profile
-```
-
-If the tenant only returns Classic Authn factors such as Okta Verify TOTP or push, the command fails with the available factor list instead of prompting for a verification code.
-
 ## Browser-Assisted FastPass
 
-When FastPass only works in the browser, use browser capture mode:
+Use browser capture mode when FastPass or a platform fingerprint authenticator is required:
 
 ```sh
 okta-awscli-rs --okta-profile default --profile my-aws-profile --browser-capture
 ```
 
 The CLI launches an isolated Chrome/Chromium-family browser session, opens the configured Okta AWS app link, lets you authenticate with FastPass, captures the AWS SAML POST, and then assumes the AWS role.
+
+`--touch-id` is different: it only unlocks the local Keychain password used by the terminal Authn flow.
 
 If automatic capture is not available, use manual paste mode:
 

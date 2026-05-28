@@ -5,7 +5,6 @@ use reqwest::Client;
 use scraper::{Html, Selector};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::process::Command;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -22,7 +21,6 @@ pub struct OktaAuth {
     username: String,
     password: String,
     token: Option<String>,
-    require_fastpass: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,7 +59,6 @@ impl OktaAuth {
         username: String,
         password: String,
         token: Option<String>,
-        require_fastpass: bool,
     ) -> Result<Self> {
         let configured_base = config.base_url_for(okta_profile)?;
         let base_url =
@@ -83,7 +80,6 @@ impl OktaAuth {
             username,
             password,
             token,
-            require_fastpass,
         })
     }
 
@@ -140,8 +136,6 @@ impl OktaAuth {
                     &factors,
                     self.factor.as_deref(),
                     self.token.as_deref(),
-                    self.require_fastpass,
-                    &self.base_url,
                 )
                 .await
             }
@@ -270,19 +264,13 @@ async fn verify_base_mfa(
     factors: &[Value],
     preferred_provider: Option<&str>,
     totp_token: Option<&str>,
-    require_fastpass: bool,
-    origin: &str,
 ) -> Result<String> {
     let mut supported: Vec<&Value> = factors
         .iter()
         .filter(|factor| {
             matches!(
                 factor["factorType"].as_str(),
-                Some("token:software:totp")
-                    | Some("push")
-                    | Some("u2f")
-                    | Some("signed_nonce")
-                    | Some("webauthn")
+                Some("token:software:totp") | Some("push") | Some("u2f")
             )
         })
         .collect();
@@ -298,28 +286,13 @@ async fn verify_base_mfa(
     if supported.is_empty() {
         bail!("MFA required, but no supported factors enrolled.");
     }
-    let preferred_provider = if require_fastpass {
-        Some("OKTA_FASTPASS")
-    } else {
-        preferred_provider
-    };
     let selected = choose_factor(
         &supported,
         preferred_provider,
         "Registered MFA factors:",
         build_base_factor_name,
     )?;
-    if require_fastpass && !is_fastpass_factor(selected) {
-        bail!(
-            "Okta FastPass was requested, but Okta did not expose a FastPass factor in this authentication response. Available factors: {}",
-            supported
-                .iter()
-                .map(|factor| build_base_factor_name(factor))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    verify_factor(client, state_token, selected, totp_token, origin).await
+    verify_factor(client, state_token, selected, totp_token).await
 }
 
 async fn stepup_auth(
@@ -406,17 +379,6 @@ async fn send_or_verify_app_factor(
     let verify = factor["_links"]["verify"]["href"]
         .as_str()
         .ok_or_else(|| anyhow!("factor missing verify link"))?;
-    if is_fastpass_factor(factor) {
-        let flow: Value = client
-            .post(verify)
-            .json(&json!({ "stateToken": state_token }))
-            .send()
-            .await?
-            .json()
-            .await?;
-        launch_fastpass_challenge(client, &flow).await?;
-        return Ok(flow);
-    }
     match factor["factorType"].as_str() {
         Some("sms") | Some("call") | Some("push") => Ok(client
             .post(verify)
@@ -444,7 +406,6 @@ async fn verify_factor(
     state_token: &str,
     factor: &Value,
     totp_token: Option<&str>,
-    origin: &str,
 ) -> Result<String> {
     let verify = factor["_links"]["verify"]["href"]
         .as_str()
@@ -454,7 +415,6 @@ async fn verify_factor(
         req["passCode"] = Value::String(pass_code(totp_token)?);
     }
     let mut resp: Value = client.post(verify).json(&req).send().await?.json().await?;
-    let mut fastpass_launched = false;
     loop {
         match resp["status"].as_str() {
             Some("SUCCESS") => {
@@ -464,37 +424,7 @@ async fn verify_factor(
                     .ok_or_else(|| anyhow!("MFA success response missing sessionToken"));
             }
             Some("MFA_CHALLENGE") if factor["factorType"].as_str() != Some("u2f") => {
-                if is_webauthn_factor(factor) {
-                    let auth_response =
-                        crate::u2f::authenticate_webauthn(&webauthn_challenge(&resp, origin)?)?;
-                    let next = resp["_links"]["next"]["href"]
-                        .as_str()
-                        .ok_or_else(|| anyhow!("WebAuthn challenge missing next link"))?;
-                    let mut webauthn_req = req.clone();
-                    if let Some(map) = webauthn_req.as_object_mut()
-                        && let Some(auth_map) = auth_response.as_object()
-                    {
-                        for (key, value) in auth_map {
-                            map.insert(key.clone(), value.clone());
-                        }
-                    }
-                    resp = client
-                        .post(next)
-                        .json(&webauthn_req)
-                        .send()
-                        .await?
-                        .json()
-                        .await?;
-                    continue;
-                }
-                if is_fastpass_factor(factor) && !fastpass_launched {
-                    fastpass_launched = launch_fastpass_challenge(client, &resp).await?;
-                }
-                if is_fastpass_factor(factor) {
-                    println!("Waiting for Okta FastPass verification...");
-                } else {
-                    println!("Waiting for push verification...");
-                }
+                println!("Waiting for push verification...");
                 match resp["factorResult"].as_str() {
                     Some("TIMEOUT") => bail!("Verification timed out"),
                     Some("REJECTED") => bail!("Verification was rejected"),
@@ -548,15 +478,6 @@ async fn verify_factor(
                     .await?;
             }
             Some("PASSWORD_EXPIRED") => bail!("Your Okta password is expired"),
-            Some("MFA_REQUIRED") if is_fastpass_factor(factor) => {
-                fastpass_launched = launch_fastpass_challenge(client, &resp).await?;
-                let next = resp["_links"]["next"]["href"]
-                    .as_str()
-                    .ok_or_else(|| anyhow!("FastPass challenge missing next link"))?
-                    .to_string();
-                sleep(Duration::from_millis(500)).await;
-                resp = client.post(next).json(&req).send().await?.json().await?;
-            }
             other => bail!("MFA verification failed with status {:?}", other),
         }
     }
@@ -574,20 +495,7 @@ fn choose_factor<'a>(
             .copied()
             .filter(|factor| factor_matches_preference(factor, preference))
             .min_by_key(|factor| factor_rank(factor))
-            .ok_or_else(|| {
-                if is_fastpass_preference(preference) {
-                    anyhow!(
-                        "Okta FastPass was requested, but Okta did not expose signed_nonce or WebAuthn factors in this Classic Authn response. Available factors: {}",
-                        factors
-                            .iter()
-                            .map(|factor| build_base_factor_name(factor))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                } else {
-                    anyhow!("Unable to locate selected factor preference {preference}")
-                }
-            })?;
+            .ok_or_else(|| anyhow!("Unable to locate selected factor preference {preference}"))?;
         return Ok(selected);
     }
     if let Some(push) = single_push_factor(factors) {
@@ -608,8 +516,6 @@ fn build_base_factor_name(factor: &Value) -> String {
         (Some("GOOGLE"), _) => with_profile(factor, "Google Authenticator"),
         (Some("OKTA"), Some("push")) => with_profile(factor, "Okta Verify - Push"),
         (Some("OKTA"), Some("token:software:totp")) => with_profile(factor, "Okta Verify - TOTP"),
-        (Some("OKTA"), Some("signed_nonce")) => with_profile(factor, "Okta FastPass"),
-        (_, Some("webauthn")) => with_profile(factor, "WebAuthn platform authenticator"),
         (Some("OKTA"), Some(factor_type)) => {
             with_profile(factor, &format!("Okta Verify - {factor_type}"))
         }
@@ -624,32 +530,12 @@ fn factor_matches_preference(factor: &Value, preference: &str) -> bool {
     let provider = factor["provider"].as_str().unwrap_or_default();
     let factor_type = factor["factorType"].as_str().unwrap_or_default();
     match preference.as_str() {
-        "FASTPASS" | "OKTA_FASTPASS" | "SIGNED_NONCE" => is_fastpass_factor(factor),
         "PUSH" | "OKTA_PUSH" => provider == "OKTA" && factor_type == "push",
         "TOTP" | "OKTA_TOTP" => provider == "OKTA" && factor_type == "token:software:totp",
         "GOOGLE" | "GOOGLE_TOTP" => provider == "GOOGLE",
         "U2F" | "FIDO" => factor_type == "u2f" || provider == "FIDO",
         _ => provider == preference,
     }
-}
-
-fn is_fastpass_preference(preference: &str) -> bool {
-    matches!(
-        preference.to_ascii_uppercase().replace('-', "_").as_str(),
-        "FASTPASS" | "OKTA_FASTPASS" | "SIGNED_NONCE"
-    )
-}
-
-fn is_fastpass_factor(factor: &Value) -> bool {
-    let provider = factor["provider"].as_str().unwrap_or_default();
-    matches!(
-        factor["factorType"].as_str(),
-        Some("signed_nonce") | Some("webauthn")
-    ) && (provider.is_empty() || provider == "OKTA" || provider == "FIDO")
-}
-
-fn is_webauthn_factor(factor: &Value) -> bool {
-    factor["factorType"].as_str() == Some("webauthn")
 }
 
 fn single_push_factor<'a>(factors: &[&'a Value]) -> Option<&'a Value> {
@@ -667,7 +553,6 @@ fn single_push_factor<'a>(factors: &[&'a Value]) -> Option<&'a Value> {
 
 fn factor_rank(factor: &Value) -> u8 {
     match factor["factorType"].as_str() {
-        Some("signed_nonce") | Some("webauthn") => 0,
         Some("push") => 0,
         Some("u2f") => 1,
         Some("token:software:totp") => 2,
@@ -716,217 +601,9 @@ fn build_app_factor_name(factor: &Value) -> String {
                 .as_str()
                 .unwrap_or("unknown")
         ),
-        Some("signed_nonce") => with_profile(factor, "Okta FastPass"),
-        Some("webauthn") => with_profile(factor, "WebAuthn platform authenticator"),
         Some(other) => format!("Unknown MFA type: {other}"),
         None => "Unknown MFA type".to_string(),
     }
-}
-
-async fn launch_fastpass_challenge(client: &Client, response: &Value) -> Result<bool> {
-    log::debug!(
-        "FastPass challenge response shape: {}",
-        redacted_json(response)
-    );
-    let challenge = find_device_challenge(response).ok_or_else(|| {
-        anyhow!(
-            "Okta FastPass was selected, but Okta did not return a launchable device challenge. Run again with --debug and share the redacted FastPass challenge response shape."
-        )
-    })?;
-    let method = challenge["challengeMethod"]
-        .as_str()
-        .unwrap_or_default()
-        .to_ascii_uppercase();
-    match method.as_str() {
-        "LOOPBACK" => launch_loopback_challenge(client, challenge).await?,
-        "CUSTOM_URI" | "UNIVERSAL_LINK" | "APP_LINK" | "CHROME_DTC" => {
-            let href = challenge["href"]
-                .as_str()
-                .ok_or_else(|| anyhow!("FastPass {method} challenge did not include href"))?;
-            open_url(href)?;
-        }
-        "" => {
-            if let Some(href) = challenge["href"].as_str() {
-                open_url(href)?;
-            } else {
-                bail!("FastPass challenge did not include challengeMethod or href");
-            }
-        }
-        other => bail!("Unsupported FastPass challenge method: {other}"),
-    }
-    Ok(true)
-}
-
-fn find_device_challenge(value: &Value) -> Option<&Value> {
-    match value {
-        Value::Object(map) => {
-            let has_method = map.contains_key("challengeMethod");
-            let has_launch = map.contains_key("href") || map.contains_key("challengeRequest");
-            if has_method && has_launch {
-                return Some(value);
-            }
-            for child in map.values() {
-                if let Some(found) = find_device_challenge(child) {
-                    return Some(found);
-                }
-            }
-            None
-        }
-        Value::Array(values) => values.iter().find_map(find_device_challenge),
-        _ => None,
-    }
-}
-
-async fn launch_loopback_challenge(client: &Client, challenge: &Value) -> Result<()> {
-    let challenge_request = challenge["challengeRequest"]
-        .as_str()
-        .ok_or_else(|| anyhow!("FastPass loopback challenge did not include challengeRequest"))?;
-    let ports = challenge["ports"]
-        .as_array()
-        .ok_or_else(|| anyhow!("FastPass loopback challenge did not include ports"))?;
-    let mut bases = Vec::new();
-    if let Some(https_domain) = challenge["httpsDomain"].as_str() {
-        bases.push(https_domain);
-    }
-    if let Some(domain) = challenge["domain"].as_str() {
-        bases.push(domain);
-    }
-    if bases.is_empty() {
-        bail!("FastPass loopback challenge did not include a domain");
-    }
-
-    for base in bases {
-        for port in ports {
-            let Some(port) = port.as_u64() else {
-                continue;
-            };
-            let probe = format!("{base}:{port}/probe");
-            if client
-                .get(&probe)
-                .timeout(Duration::from_millis(750))
-                .send()
-                .await
-                .is_err()
-            {
-                continue;
-            }
-            let challenge_url = format!("{base}:{port}/challenge");
-            let result = client
-                .post(&challenge_url)
-                .timeout(Duration::from_secs(300))
-                .json(&json!({ "challengeRequest": challenge_request }))
-                .send()
-                .await;
-            match result {
-                Ok(resp) if resp.status().is_success() => {
-                    println!("Opened Okta FastPass challenge through local Okta Verify.");
-                    return Ok(());
-                }
-                Ok(resp) if resp.status().as_u16() == 503 => continue,
-                Ok(resp) => bail!(
-                    "Okta Verify rejected the FastPass challenge with {}",
-                    resp.status()
-                ),
-                Err(_) => continue,
-            }
-        }
-    }
-    bail!("Unable to contact local Okta Verify for the FastPass loopback challenge")
-}
-
-fn open_url(href: &str) -> Result<()> {
-    println!("Opening Okta Verify for FastPass...");
-    let status = Command::new("open").arg(href).status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("failed to open Okta Verify challenge URL")
-    }
-}
-
-fn webauthn_challenge(response: &Value, origin: &str) -> Result<crate::u2f::WebAuthnChallenge> {
-    let challenge = response["_embedded"]["factor"]["_embedded"]["challenge"]["challenge"]
-        .as_str()
-        .ok_or_else(|| anyhow!("WebAuthn challenge missing challenge value"))?;
-    let credential_id = response["_embedded"]["factor"]["profile"]["credentialId"]
-        .as_str()
-        .ok_or_else(|| anyhow!("WebAuthn challenge missing credentialId"))?;
-    let user_verification =
-        response["_embedded"]["factor"]["_embedded"]["challenge"]["userVerification"]
-            .as_str()
-            .unwrap_or("preferred");
-    let relying_party_id = url::Url::parse(origin)?
-        .host_str()
-        .ok_or_else(|| anyhow!("Okta origin missing host"))?
-        .to_string();
-    Ok(crate::u2f::WebAuthnChallenge {
-        origin: origin.to_string(),
-        relying_party_id,
-        credential_id: credential_id.to_string(),
-        challenge: challenge.to_string(),
-        user_verification: user_verification.to_string(),
-    })
-}
-
-fn redacted_json(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let mut out = serde_json::Map::new();
-            for (key, value) in map {
-                let redacted = if is_sensitive_json_key(key) {
-                    Value::String("<redacted>".to_string())
-                } else if should_keep_json_string(key) {
-                    match value {
-                        Value::String(s) => Value::String(s.clone()),
-                        _ => redacted_json(value),
-                    }
-                } else {
-                    redacted_json(value)
-                };
-                out.insert(key.clone(), redacted);
-            }
-            Value::Object(out)
-        }
-        Value::Array(values) => Value::Array(values.iter().map(redacted_json).collect()),
-        Value::String(_) => Value::String("<string>".to_string()),
-        Value::Number(_) => Value::String("<number>".to_string()),
-        Value::Bool(_) => Value::String("<bool>".to_string()),
-        Value::Null => Value::Null,
-    }
-}
-
-fn is_sensitive_json_key(key: &str) -> bool {
-    matches!(
-        key,
-        "stateToken"
-            | "sessionToken"
-            | "challengeRequest"
-            | "href"
-            | "next"
-            | "verify"
-            | "poll"
-            | "cancel"
-            | "passCode"
-            | "password"
-            | "nonce"
-            | "credentialId"
-            | "correctAnswer"
-    )
-}
-
-fn should_keep_json_string(key: &str) -> bool {
-    matches!(
-        key,
-        "status"
-            | "factorResult"
-            | "factorType"
-            | "provider"
-            | "challengeMethod"
-            | "name"
-            | "rel"
-            | "type"
-            | "errorCode"
-    )
 }
 
 fn pass_code(totp_token: Option<&str>) -> Result<String> {
@@ -997,128 +674,5 @@ mod tests {
             build_base_factor_name(&factor),
             "Okta Verify - TOTP (user@example.com)"
         );
-    }
-
-    #[test]
-    fn fastpass_preference_picks_signed_nonce() {
-        let push = json!({
-            "provider": "OKTA",
-            "factorType": "push",
-            "profile": { "name": "phone" }
-        });
-        let fastpass = json!({
-            "provider": "OKTA",
-            "factorType": "signed_nonce",
-            "profile": { "name": "MacBook" }
-        });
-        let factors = vec![&push, &fastpass];
-        let selected = choose_factor(
-            &factors,
-            Some("OKTA_FASTPASS"),
-            "Registered MFA factors:",
-            build_base_factor_name,
-        )
-        .unwrap();
-        assert_eq!(selected["factorType"].as_str(), Some("signed_nonce"));
-        assert_eq!(build_base_factor_name(selected), "Okta FastPass (MacBook)");
-    }
-
-    #[test]
-    fn fastpass_preference_reports_available_classic_factors() {
-        let totp = json!({
-            "provider": "OKTA",
-            "factorType": "token:software:totp",
-            "profile": { "credentialId": "user@example.com" }
-        });
-        let factors = vec![&totp];
-        let err = choose_factor(
-            &factors,
-            Some("OKTA_FASTPASS"),
-            "Registered MFA factors:",
-            build_base_factor_name,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("Okta FastPass was requested"));
-        assert!(err.to_string().contains("Okta Verify - TOTP"));
-    }
-
-    #[test]
-    fn finds_nested_device_challenge() {
-        let response = json!({
-            "status": "MFA_CHALLENGE",
-            "_embedded": {
-                "factor": {
-                    "_embedded": {
-                        "challenge": {
-                            "challengeMethod": "APP_LINK",
-                            "href": "okta-verify://challenge"
-                        }
-                    }
-                }
-            }
-        });
-        let challenge = find_device_challenge(&response).unwrap();
-        assert_eq!(challenge["challengeMethod"].as_str(), Some("APP_LINK"));
-    }
-
-    #[test]
-    fn redacts_fastpass_response_diagnostics() {
-        let response = json!({
-            "status": "MFA_CHALLENGE",
-            "stateToken": "secret-state",
-            "_embedded": {
-                "factor": {
-                    "factorType": "signed_nonce",
-                    "_embedded": {
-                        "challenge": {
-                            "challengeMethod": "APP_LINK",
-                            "href": "okta-verify://secret",
-                            "challengeRequest": "secret-jwt",
-                            "ports": [8769]
-                        }
-                    }
-                }
-            }
-        });
-        let redacted = redacted_json(&response);
-        assert_eq!(redacted["status"].as_str(), Some("MFA_CHALLENGE"));
-        assert_eq!(redacted["stateToken"].as_str(), Some("<redacted>"));
-        assert_eq!(
-            redacted["_embedded"]["factor"]["factorType"].as_str(),
-            Some("signed_nonce")
-        );
-        assert_eq!(
-            redacted["_embedded"]["factor"]["_embedded"]["challenge"]["challengeMethod"].as_str(),
-            Some("APP_LINK")
-        );
-        assert_eq!(
-            redacted["_embedded"]["factor"]["_embedded"]["challenge"]["href"].as_str(),
-            Some("<redacted>")
-        );
-    }
-
-    #[test]
-    fn builds_webauthn_challenge_from_okta_response() {
-        let response = json!({
-            "_embedded": {
-                "factor": {
-                    "profile": {
-                        "credentialId": "credential"
-                    },
-                    "_embedded": {
-                        "challenge": {
-                            "challenge": "challenge",
-                            "userVerification": "required"
-                        }
-                    }
-                }
-            }
-        });
-        let challenge = webauthn_challenge(&response, "https://example.okta.com").unwrap();
-        assert_eq!(challenge.origin, "https://example.okta.com");
-        assert_eq!(challenge.relying_party_id, "example.okta.com");
-        assert_eq!(challenge.credential_id, "credential");
-        assert_eq!(challenge.challenge, "challenge");
-        assert_eq!(challenge.user_verification, "required");
     }
 }

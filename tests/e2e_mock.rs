@@ -96,7 +96,6 @@ async fn mock_okta_to_aws_credentials_flow() -> Result<()> {
         "jane".to_string(),
         "pw".to_string(),
         None,
-        false,
     )?;
     let (_, saml) = okta.get_assertion(&mut config).await?;
     let aws = AwsAuth::new(
@@ -186,7 +185,6 @@ async fn primary_totp_mfa_sends_pass_code() -> Result<()> {
         "jane".to_string(),
         "pw".to_string(),
         Some("654321".to_string()),
-        false,
     )?;
     let (_, saml) = okta.get_assertion(&mut config).await?;
 

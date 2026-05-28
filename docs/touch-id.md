@@ -51,6 +51,8 @@ Built-in macOS Touch ID/passkeys for Okta require a browser-associated or signed
 
 Use it only when the Okta WebAuthn credential was enrolled through that compatible virtual authenticator model. Existing browser or iCloud Keychain passkeys are not exportable into this path; use `--browser` for those.
 
+If Okta returns a non-32-byte credential id, the credential is not compatible with this experimental path.
+
 ## Limitations
 
 The current implementation is an application-level Touch ID gate before this binary reads the Keychain item. The Keychain item itself is not created with a per-item biometric access-control policy.

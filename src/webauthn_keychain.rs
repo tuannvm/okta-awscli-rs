@@ -33,7 +33,10 @@ pub fn authenticate(challenge: &WebAuthnChallenge) -> Result<serde_json::Value> 
     let client_data_hash: [u8; 32] = Sha256::digest(client_data_json.as_bytes()).into();
     let credential_id = Zeroizing::new(decode_base64url(&challenge.credential_id)?);
     if credential_id.len() != 32 {
-        bail!("WebAuthn Keychain credential id must be 32 bytes");
+        bail!(
+            "This Okta WebAuthn credential is not compatible with --webauthn-keychain. The experimental Keychain authenticator can only use ctap-keyring-device-style 32-byte credential ids; Okta returned a {}-byte credential id. Use --browser for existing browser, iCloud Keychain, or FastPass credentials.",
+            credential_id.len()
+        );
     }
 
     let mut user_uuid = [0_u8; 16];
@@ -44,7 +47,7 @@ pub fn authenticate(challenge: &WebAuthnChallenge) -> Result<serde_json::Value> 
     let encoded_key = keychain_get(&challenge.relying_party_id, &hex_lower(&user_uuid))?
         .ok_or_else(|| {
             anyhow!(
-                "No macOS Keychain WebAuthn credential found for relying party {}",
+                "No compatible macOS Keychain WebAuthn credential was found for relying party {}. Use --browser for existing browser, iCloud Keychain, or FastPass credentials.",
                 challenge.relying_party_id
             )
         })?;

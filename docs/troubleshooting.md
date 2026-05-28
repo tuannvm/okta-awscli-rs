@@ -89,6 +89,8 @@ If capture times out:
 
 Use `--browser` when your fingerprint authenticator was registered in a normal browser or through Okta FastPass.
 
+If the command says Okta returned a non-32-byte credential id, that credential was not enrolled through the compatible virtual-authenticator model. That is expected for normal browser-managed Okta WebAuthn credentials.
+
 ## Cargo Cache Permission Errors
 
 Use a repo-local Cargo cache:

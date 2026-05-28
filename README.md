@@ -57,6 +57,14 @@ Use a TOTP code without waiting for an interactive prompt:
 okta-awscli-rs --profile my-aws-profile --token 123456
 ```
 
+## Decision Guide
+
+| Need | Use |
+| --- | --- |
+| FastPass, Touch ID, or browser-registered fingerprint auth | `--browser` |
+| Okta Verify push, TOTP, U2F, or app-level MFA | default flow |
+| Experimental terminal WebAuthn | `--webauthn-keychain` with CLI-enrolled credentials only |
+
 ## Configuration
 
 The config file is `~/.okta-aws`:
@@ -121,7 +129,7 @@ okta-awscli-rs --okta-profile default --profile my-aws-profile --browser-paste
 
 ## Experimental WebAuthn Keychain
 
-For Okta tenants that expose a Classic Authn `webauthn` factor, the CLI can try a macOS Keychain-backed virtual authenticator:
+For Okta tenants that expose a Classic Authn `webauthn` factor, the CLI can try a macOS Keychain-backed virtual authenticator. This is niche and experimental; use `--browser` for normal FastPass, Touch ID, browser passkeys, or platform fingerprint authentication.
 
 ```sh
 okta-awscli-rs --okta-profile default --profile my-aws-profile --webauthn-keychain

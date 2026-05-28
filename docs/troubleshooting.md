@@ -78,6 +78,8 @@ Okta FastPass uses Okta Verify device challenge factors such as `signed_nonce` o
 
 Use `factor = OKTA_PUSH` when you want an Okta Verify push from the Classic Authn flow. Use `--okta-fastpass` only when you specifically want the CLI to require a FastPass-capable factor.
 
+If the Okta web UI shows a security key or biometric authenticator but this CLI lists only TOTP factors, the authenticator is not being exposed through the Classic Authn response used by the AWS SAML flow. That web-registered authenticator generally requires Okta's browser/IDX device challenge path.
+
 ## Cargo Cache Permission Errors
 
 Use a repo-local Cargo cache:

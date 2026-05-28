@@ -81,6 +81,11 @@ pub async fn run() -> Result<()> {
         args.touch_id,
         args.store_touch_id,
     )?;
+    if args.touch_id && !args.okta_fastpass {
+        eprintln!(
+            "Note: --touch-id only unlocks the local Keychain password. Use --okta-fastpass to require an Okta FastPass factor."
+        );
+    }
 
     let aws_auth = AwsAuth::new(
         args.profile.clone(),

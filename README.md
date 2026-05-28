@@ -23,13 +23,19 @@ Install the latest release:
 curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/feature/rust-okta-awscli/scripts/install.sh | sh
 ```
 
+For this private repository, use GitHub CLI authentication:
+
+```sh
+gh api repos/tuannvm/okta-awscli-rs/contents/scripts/install.sh --jq .content | openssl base64 -d -A | GH_TOKEN="$(gh auth token)" sh
+```
+
 Install a specific version:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/feature/rust-okta-awscli/scripts/install.sh | OKTA_AWSCLI_RS_VERSION=0.1.0 sh
 ```
 
-The installer downloads the matching release asset for macOS or Linux, verifies `SHA256SUMS`, and installs `okta-awscli-rs` into `${HOME}/.local/bin` by default. Set `INSTALL_DIR` to choose a different destination.
+The installer downloads the matching release asset for macOS or Linux, verifies `SHA256SUMS`, and installs `okta-awscli-rs` into `${HOME}/.local/bin` by default. Set `INSTALL_DIR` to choose a different destination. For private releases, pass `GH_TOKEN` or `GITHUB_TOKEN`.
 
 Install from source:
 

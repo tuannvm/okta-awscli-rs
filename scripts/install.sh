@@ -16,6 +16,36 @@ need() {
 need curl
 need tar
 
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT INT TERM
+
+token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+curl_config=""
+if [ -n "$token" ]; then
+  curl_config="$tmp/curl.conf"
+  umask 077
+  printf 'header = "Authorization: Bearer %s"\n' "$token" > "$curl_config"
+fi
+
+fetch() {
+  url="$1"
+  output="$2"
+  if [ -n "$curl_config" ]; then
+    curl -fL -K "$curl_config" "$url" -o "$output"
+  else
+    curl -fL "$url" -o "$output"
+  fi
+}
+
+fetch_stdout() {
+  url="$1"
+  if [ -n "$curl_config" ]; then
+    curl -fsSL -K "$curl_config" "$url"
+  else
+    curl -fsSL "$url"
+  fi
+}
+
 os="$(uname -s)"
 arch="$(uname -m)"
 case "$os:$arch" in
@@ -42,22 +72,29 @@ fi
 
 if [ "$version" = "latest" ]; then
   latest_url="https://api.github.com/repos/$repo/releases/latest"
-  resolved="$(curl -fsSL "$latest_url" | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' | head -n 1)"
+  if [ -n "$token" ] && command -v gh >/dev/null 2>&1; then
+    resolved="$(GH_TOKEN="$token" gh release view --repo "$repo" --json tagName --jq '.tagName' | sed 's/^v//')"
+  else
+    resolved="$(fetch_stdout "$latest_url" | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' | head -n 1)"
+  fi
   if [ -z "$resolved" ]; then
     echo "error: could not resolve latest release version" >&2
     exit 1
   fi
+  tag="v$resolved"
   asset="$bin-$resolved-$target.tar.gz"
 else
   asset="$bin-${tag#v}-$target.tar.gz"
 fi
 
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT INT TERM
-
 echo "Downloading $repo $label for $target..."
-curl -fL "$base_url/$asset" -o "$tmp/$asset"
-curl -fL "$base_url/SHA256SUMS" -o "$tmp/SHA256SUMS"
+if [ -n "$token" ] && command -v gh >/dev/null 2>&1; then
+  GH_TOKEN="$token" gh release download "$tag" --repo "$repo" --pattern "$asset" --dir "$tmp" --clobber
+  GH_TOKEN="$token" gh release download "$tag" --repo "$repo" --pattern SHA256SUMS --dir "$tmp" --clobber
+else
+  fetch "$base_url/$asset" "$tmp/$asset"
+  fetch "$base_url/SHA256SUMS" "$tmp/SHA256SUMS"
+fi
 
 (
   cd "$tmp"

@@ -2,6 +2,8 @@
 
 The implementation follows the Python tool's Classic Okta Authn plus AWS SAML design.
 
+`--browser-paste` is a separate browser-assisted path for environments where FastPass is only available in the browser. In that mode, the CLI opens the configured Okta AWS app link, accepts a pasted `SAMLResponse`, and then resumes at AWS STS role exchange.
+
 ## High-Level Flow
 
 1. Read `~/.okta-aws`.

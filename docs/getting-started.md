@@ -77,6 +77,16 @@ Refresh role selection even when a role is saved:
 okta-awscli-rs --profile prod-admin --refresh-role
 ```
 
+## Browser-Assisted FastPass
+
+If FastPass works in your browser but not through terminal MFA, use paste mode:
+
+```sh
+okta-awscli-rs --okta-profile default --profile prod-admin --force --browser-paste
+```
+
+The profile must have an `app-link`. The CLI opens that link in your browser; after browser FastPass completes, copy the `SAMLResponse` value and paste it into the CLI prompt. The CLI then assumes the AWS role normally.
+
 ## Use Multiple Okta Profiles
 
 Select a profile explicitly:

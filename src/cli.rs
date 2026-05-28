@@ -1,5 +1,6 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
+use std::process::Command;
 
 use crate::aws::{AwsAuth, AwsSdkProvider, StsProvider};
 use crate::config::{OktaConfig, configure_interactive};
@@ -49,6 +50,11 @@ pub struct Args {
         help = "Require Okta FastPass / signed-nonce MFA when Okta exposes it"
     )]
     okta_fastpass: bool,
+    #[arg(
+        long,
+        help = "Open the configured Okta AWS app in a browser and prompt for a pasted SAMLResponse"
+    )]
+    browser_paste: bool,
     #[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
     awscli_args: Vec<String>,
 }
@@ -67,21 +73,30 @@ pub async fn run() -> Result<()> {
     } else {
         args.okta_profile.clone()
     };
-    let username = args
-        .okta_username
-        .clone()
-        .map(Ok)
-        .unwrap_or_else(|| config.username_for(&okta_profile))?;
-    let password = crate::secrets::password(
-        args.okta_password
-            .clone()
-            .or(config.password_for(&okta_profile)?),
-        &okta_profile,
-        &username,
-        args.touch_id,
-        args.store_touch_id,
-    )?;
-    if args.touch_id && !args.okta_fastpass {
+    let username = if args.browser_paste {
+        None
+    } else {
+        Some(
+            args.okta_username
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(|| config.username_for(&okta_profile))?,
+        )
+    };
+    let password = if let Some(username) = &username {
+        Some(crate::secrets::password(
+            args.okta_password
+                .clone()
+                .or(config.password_for(&okta_profile)?),
+            &okta_profile,
+            username,
+            args.touch_id,
+            args.store_touch_id,
+        )?)
+    } else {
+        None
+    };
+    if args.touch_id && !args.okta_fastpass && !args.browser_paste {
         eprintln!(
             "Note: --touch-id only unlocks the local Keychain password. Use --okta-fastpass to require an Okta FastPass factor."
         );
@@ -107,6 +122,7 @@ pub async fn run() -> Result<()> {
             cache: args.cache,
             refresh_role: args.refresh_role,
             okta_fastpass: args.okta_fastpass,
+            browser_paste: args.browser_paste,
         };
         get_credentials(&mut config, &aws_auth, &provider, request).await?;
     }
@@ -121,12 +137,13 @@ pub async fn run() -> Result<()> {
 
 struct CredentialRequest<'a> {
     okta_profile: &'a str,
-    username: String,
-    password: String,
+    username: Option<String>,
+    password: Option<String>,
     token: Option<String>,
     cache: bool,
     refresh_role: bool,
     okta_fastpass: bool,
+    browser_paste: bool,
 }
 
 async fn get_credentials<P: StsProvider + Sync>(
@@ -135,15 +152,23 @@ async fn get_credentials<P: StsProvider + Sync>(
     provider: &P,
     request: CredentialRequest<'_>,
 ) -> Result<()> {
-    let mut okta = OktaAuth::new(
-        config,
-        request.okta_profile,
-        request.username,
-        request.password,
-        request.token,
-        request.okta_fastpass,
-    )?;
-    let (_, assertion) = okta.get_assertion(config).await?;
+    let assertion = if request.browser_paste {
+        browser_paste_assertion(config, request.okta_profile)?
+    } else {
+        let mut okta = OktaAuth::new(
+            config,
+            request.okta_profile,
+            request
+                .username
+                .ok_or_else(|| anyhow!("username missing for Okta authentication"))?,
+            request
+                .password
+                .ok_or_else(|| anyhow!("password missing for Okta authentication"))?,
+            request.token,
+            request.okta_fastpass,
+        )?;
+        okta.get_assertion(config).await?.1
+    };
     let role = aws_auth
         .choose_aws_role(&assertion, request.refresh_role, provider)
         .await?;
@@ -170,6 +195,58 @@ async fn get_credentials<P: StsProvider + Sync>(
         aws_auth.write_sts_token(&sts_token)?;
     }
     Ok(())
+}
+
+fn browser_paste_assertion(config: &OktaConfig, okta_profile: &str) -> Result<String> {
+    let app_link = config.app_link_for(okta_profile)?.ok_or_else(|| {
+        anyhow!(
+            "--browser-paste requires app-link in ~/.okta-aws. Run the normal flow once to discover it, or set app-link manually."
+        )
+    })?;
+    open_browser(&app_link)?;
+    eprintln!("Opened Okta AWS app link in your browser.");
+    eprintln!(
+        "Authenticate with FastPass, capture the SAMLResponse, paste it below, and press Enter."
+    );
+    let pasted: String = dialoguer::Input::new()
+        .with_prompt("SAMLResponse")
+        .interact_text()?;
+    parse_pasted_saml_response(&pasted)
+}
+
+fn open_browser(url: &str) -> Result<()> {
+    let status = if cfg!(target_os = "macos") {
+        Command::new("open").arg(url).status()
+    } else if cfg!(target_os = "windows") {
+        Command::new("cmd").args(["/C", "start", "", url]).status()
+    } else {
+        Command::new("xdg-open").arg(url).status()
+    }
+    .context("opening browser")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("failed to open browser for Okta app link")
+    }
+}
+
+fn parse_pasted_saml_response(input: &str) -> Result<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        bail!("SAMLResponse cannot be empty");
+    }
+    if let Some(assertion) = crate::okta::simple_assertion(trimmed) {
+        return Ok(assertion);
+    }
+    if trimmed.contains("SAMLResponse=") {
+        let query = trimmed.split_once('?').map(|(_, q)| q).unwrap_or(trimmed);
+        for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+            if key == "SAMLResponse" {
+                return Ok(value.into_owned());
+            }
+        }
+    }
+    Ok(trimmed.to_string())
 }
 
 pub fn console_output(access_key_id: &str, secret_access_key: &str, session_token: &str) -> String {
@@ -221,6 +298,30 @@ mod tests {
         assert_eq!(
             console_output("ak", "sk", "tok"),
             "export AWS_ACCESS_KEY_ID=ak\nexport AWS_SECRET_ACCESS_KEY=sk\nexport AWS_SESSION_TOKEN=tok"
+        );
+    }
+
+    #[test]
+    fn parses_raw_pasted_saml_response() {
+        assert_eq!(
+            parse_pasted_saml_response(" abc123 ").unwrap(),
+            "abc123".to_string()
+        );
+    }
+
+    #[test]
+    fn parses_html_pasted_saml_response() {
+        assert_eq!(
+            parse_pasted_saml_response(r#"<input name="SAMLResponse" value="abc123">"#).unwrap(),
+            "abc123".to_string()
+        );
+    }
+
+    #[test]
+    fn parses_form_encoded_pasted_saml_response() {
+        assert_eq!(
+            parse_pasted_saml_response("RelayState=x&SAMLResponse=abc%2B123%3D").unwrap(),
+            "abc+123=".to_string()
         );
     }
 }

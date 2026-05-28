@@ -106,6 +106,16 @@ okta-awscli-rs --okta-fastpass --username user@example.com --profile my-aws-prof
 
 If the tenant only returns Classic Authn factors such as Okta Verify TOTP or push, the command fails with the available factor list instead of prompting for a verification code.
 
+## Browser-Assisted FastPass
+
+When FastPass only works in the browser, use paste mode:
+
+```sh
+okta-awscli-rs --okta-profile default --profile my-aws-profile --browser-paste
+```
+
+The CLI opens the configured Okta AWS app link. Authenticate in the browser, copy the SAMLResponse value from the AWS SAML form, paste it into the CLI, and the CLI will still assume the AWS role and write credentials.
+
 ## End-to-End Testing
 
 Run the deterministic mock E2E tests:

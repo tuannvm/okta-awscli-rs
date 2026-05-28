@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/feature/rust
 Install a specific version:
 
 ```sh
-OKTA_AWSCLI_RS_VERSION=0.1.0 curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/feature/rust-okta-awscli/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/feature/rust-okta-awscli/scripts/install.sh | OKTA_AWSCLI_RS_VERSION=0.1.0 sh
 ```
 
 The installer downloads the matching release asset for macOS or Linux, verifies `SHA256SUMS`, and installs `okta-awscli-rs` into `${HOME}/.local/bin` by default. Set `INSTALL_DIR` to choose a different destination.

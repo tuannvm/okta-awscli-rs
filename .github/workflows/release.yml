@@ -6,7 +6,7 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,7 +28,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -61,7 +61,7 @@ jobs:
           tar -C dist -czf "dist/${asset}.tar.gz" "${asset}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: okta-awscli-rs-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -71,9 +71,11 @@ jobs:
     name: Publish GitHub release
     runs-on: ubuntu-24.04
     needs: build
+    permissions:
+      contents: write
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           path: dist
           merge-multiple: true

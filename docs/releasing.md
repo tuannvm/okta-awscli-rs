@@ -50,5 +50,5 @@ curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/feature/rust
 Install a specific version:
 
 ```sh
-OKTA_AWSCLI_RS_VERSION=0.1.0 curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/feature/rust-okta-awscli/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/tuannvm/okta-awscli-rs/feature/rust-okta-awscli/scripts/install.sh | OKTA_AWSCLI_RS_VERSION=0.1.0 sh
 ```

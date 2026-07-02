@@ -745,14 +745,16 @@ fn choose_factor<'a>(
 
 fn build_base_factor_name(factor: &Value) -> String {
     match (factor["provider"].as_str(), factor["factorType"].as_str()) {
-        (Some("GOOGLE"), _) => with_profile(factor, "Google Authenticator"),
-        (Some("OKTA"), Some("push")) => with_profile(factor, "Okta Verify - Push"),
-        (Some("OKTA"), Some("token:software:totp")) => with_profile(factor, "Okta Verify - TOTP"),
-        (_, Some("webauthn")) => with_profile(factor, "WebAuthn platform authenticator"),
-        (Some("OKTA"), Some(factor_type)) => {
-            with_profile(factor, &format!("Okta Verify - {factor_type}"))
+        (Some("GOOGLE"), _) => with_factor_details(factor, "Google Authenticator"),
+        (Some("OKTA"), Some("push")) => with_factor_details(factor, "Okta Verify - Push"),
+        (Some("OKTA"), Some("token:software:totp")) => {
+            with_factor_details(factor, "Okta Verify - TOTP")
         }
-        (Some("FIDO"), _) => with_profile(factor, "U2F security key"),
+        (_, Some("webauthn")) => with_factor_details(factor, "WebAuthn platform authenticator"),
+        (Some("OKTA"), Some(factor_type)) => {
+            with_factor_details(factor, &format!("Okta Verify - {factor_type}"))
+        }
+        (Some("FIDO"), _) => with_factor_details(factor, "U2F security key"),
         (Some(provider), _) => format!("Unsupported factor type: {provider}"),
         _ => "Unknown MFA factor".to_string(),
     }
@@ -795,16 +797,41 @@ fn factor_rank(factor: &Value) -> u8 {
     }
 }
 
-fn with_profile(factor: &Value, label: &str) -> String {
-    let profile = &factor["profile"];
-    for key in ["name", "deviceType", "credentialId", "phoneNumber"] {
-        if let Some(value) = profile[key].as_str()
-            && !value.is_empty()
-        {
-            return format!("{label} ({value})");
-        }
+fn with_factor_details(factor: &Value, label: &str) -> String {
+    let details = factor_details(factor);
+    if details.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label} ({})", details.join(", "))
     }
-    label.to_string()
+}
+
+fn factor_details(factor: &Value) -> Vec<String> {
+    let mut details = Vec::new();
+    let profile = &factor["profile"];
+    if let Some(value) = profile["name"].as_str()
+        && !value.is_empty()
+    {
+        push_unique_detail(&mut details, format!("name: {value}"));
+    }
+
+    if let Some(id) = factor["id"].as_str()
+        && !id.is_empty()
+    {
+        push_unique_detail(&mut details, format!("factor id: {}", short_id(id)));
+    }
+
+    details
+}
+
+fn push_unique_detail(details: &mut Vec<String>, detail: String) {
+    if !details.iter().any(|existing| existing == &detail) {
+        details.push(detail);
+    }
+}
+
+fn short_id(id: &str) -> &str {
+    id.get(..12).unwrap_or(id)
 }
 
 fn build_app_factor_name(factor: &Value) -> String {
@@ -836,7 +863,7 @@ fn build_app_factor_name(factor: &Value) -> String {
                 .as_str()
                 .unwrap_or("unknown")
         ),
-        Some("webauthn") => with_profile(factor, "WebAuthn platform authenticator"),
+        Some("webauthn") => with_factor_details(factor, "WebAuthn platform authenticator"),
         Some(other) => format!("Unknown MFA type: {other}"),
         None => "Unknown MFA type".to_string(),
     }
@@ -964,13 +991,35 @@ mod tests {
     #[test]
     fn factor_name_includes_type_and_profile() {
         let factor = json!({
+            "id": "ost123456789abcdef",
             "provider": "OKTA",
             "factorType": "token:software:totp",
-            "profile": { "credentialId": "user@example.com" }
+            "profile": {
+                "credentialId": "user@example.com"
+            }
         });
         assert_eq!(
             build_base_factor_name(&factor),
-            "Okta Verify - TOTP (user@example.com)"
+            "Okta Verify - TOTP (factor id: ost123456789)"
+        );
+    }
+
+    #[test]
+    fn factor_name_includes_multiple_device_details() {
+        let factor = json!({
+            "id": "opftabcdef1234567890",
+            "provider": "OKTA",
+            "factorType": "push",
+            "profile": {
+                "name": "Tommy's iPhone",
+                "deviceName": "iPhone 15 Pro",
+                "platform": "IOS",
+                "credentialId": "user@example.com"
+            }
+        });
+        assert_eq!(
+            build_base_factor_name(&factor),
+            "Okta Verify - Push (name: Tommy's iPhone, factor id: opftabcdef12)"
         );
     }
 

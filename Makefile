@@ -32,13 +32,13 @@ clippy:
 lint: fmt check clippy
 
 build:
-	$(CARGO_ENV) $(CARGO) build
+	$(CARGO_ENV) $(CARGO) build --locked
 
 build-release:
 	$(CARGO_ENV) $(CARGO) build --release --locked
 
 test:
-	$(CARGO_ENV) $(CARGO) test
+	$(CARGO_ENV) $(CARGO) test --locked
 
 test-cli:
 	$(CARGO_ENV) $(CARGO) test --test cli
@@ -57,7 +57,7 @@ audit:
 	fi
 
 install:
-	$(CARGO_ENV) $(CARGO) install --path . --locked
+	$(CARGO) install --path . --locked
 
 clean:
 	$(CARGO_ENV) $(CARGO) clean
